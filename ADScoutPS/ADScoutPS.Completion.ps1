@@ -159,3 +159,75 @@ Register-ArgumentCompleter -CommandName Get-ADScoutGroupMember -ParameterName Id
         return
     }
 }
+
+
+Register-ArgumentCompleter -CommandName Get-ADScoutObjectAcl,Find-ADScoutInterestingAce -ParameterName ObjectClass -ScriptBlock {
+    param($commandName, $parameterName, $wordToComplete)
+
+    'organizationalUnit','group','user','computer' |
+        Where-Object { $_ -like "$wordToComplete*" } |
+        ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new(
+                $_,
+                $_,
+                'ParameterValue',
+                "Object class hint: $_"
+            )
+        }
+}
+
+Register-ArgumentCompleter -CommandName Get-ADScoutObjectAcl,Find-ADScoutInterestingAce -ParameterName Identity -ScriptBlock {
+    param($commandName, $parameterName, $wordToComplete)
+
+    try {
+        $domainObj = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+        $pdc = $domainObj.PdcRoleOwner.Name
+        $dn = ([ADSI]'').distinguishedName
+        $searchRoot = [ADSI]"LDAP://$pdc/$dn"
+    }
+    catch {
+        try {
+            $root = [ADSI]'LDAP://RootDSE'
+            $baseDn = $root.defaultNamingContext
+            if (-not $baseDn) { return }
+            $searchRoot = [ADSI]"LDAP://$baseDn"
+        }
+        catch { return }
+    }
+
+    try {
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher($searchRoot)
+        $searcher.PageSize = 50
+        $searcher.SizeLimit = 25
+
+        $safeWord = $wordToComplete.Replace('\','\5c').Replace('*','\2a').Replace('(','\28').Replace(')','\29').Replace("'", '')
+        if ([string]::IsNullOrWhiteSpace($safeWord)) {
+            $searcher.Filter = '(|(objectClass=organizationalUnit)(objectClass=group)(objectCategory=person)(objectCategory=computer))'
+        }
+        else {
+            $searcher.Filter = "(|(name=*$safeWord*)(cn=*$safeWord*)(ou=*$safeWord*)(samAccountName=*$safeWord*)(dNSHostName=*$safeWord*))"
+        }
+
+        [void]$searcher.PropertiesToLoad.Add('name')
+        [void]$searcher.PropertiesToLoad.Add('samAccountName')
+        [void]$searcher.PropertiesToLoad.Add('distinguishedName')
+
+        foreach ($result in $searcher.FindAll()) {
+            $display = if ($result.Properties.Contains('samaccountname')) { $result.Properties.samaccountname[0].ToString() }
+                       elseif ($result.Properties.Contains('name')) { $result.Properties.name[0].ToString() }
+                       else { $result.Properties.distinguishedname[0].ToString() }
+
+            $dn = if ($result.Properties.Contains('distinguishedname')) { $result.Properties.distinguishedname[0].ToString() } else { $display }
+
+            [System.Management.Automation.CompletionResult]::new(
+                "'$display'",
+                $display,
+                'ParameterValue',
+                $dn
+            )
+        }
+    }
+    catch {
+        return
+    }
+}

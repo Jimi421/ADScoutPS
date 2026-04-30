@@ -1,4 +1,4 @@
-# ADScoutPS Usage Guide
+# ADScoutPS Usage
 
 ## Import
 
@@ -6,44 +6,57 @@
 Import-Module .\ADScoutPS\ADScoutPS.psd1 -Force
 ```
 
-## Basic Sanity Check
+## Recommended operator workflow
+
+Start with the high-signal GUI view:
 
 ```powershell
-Get-ADScoutDomainInfo
+Invoke-ADScout -Gui -SkipAclSweep
 ```
 
-If this fails, check domain connectivity, DNS, VPN, or credentials.
-
-## Fast Lab Collection
+Then manually dig deeper with CLI commands:
 
 ```powershell
-Invoke-ADScout -SkipAclSweep
+Find-ADScoutSPNAccount
+Find-ADScoutPrivilegedUser -Recursive
+Find-ADScoutDelegationHint
+Get-ADScoutOU
+Get-ADScoutObjectAcl -Name "Workstations" -ObjectClass organizationalUnit
 ```
 
-## Full Collection
+## Full collection
 
 ```powershell
-Invoke-ADScout -OutputFormat Both
+Invoke-ADScout
 ```
 
-## Alternate Credentials
+## GUI-only style review
+
+```powershell
+Show-ADScoutFindingsGui -SkipAclSweep
+```
+
+## Findings as objects
+
+```powershell
+Get-ADScoutFinding -SkipAclSweep | Sort-Object Severity,Type
+```
+
+## Export only findings
+
+```powershell
+Get-ADScoutFinding -SkipAclSweep | Export-Csv .\findings.csv -NoTypeInformation
+```
+
+## Target a specific DC
+
+```powershell
+Invoke-ADScout -Server dc01.corp.local -Gui -SkipAclSweep
+```
+
+## Use alternate credentials
 
 ```powershell
 $cred = Get-Credential
-Invoke-ADScout -Server dc01.corp.local -Credential $cred
-```
-
-## ACL Review
-
-```powershell
-Get-ADScoutOU
-Find-ADScoutInterestingAce -DistinguishedName "OU=Workstations,DC=corp,DC=local"
-```
-
-## Helpful PowerShell Patterns
-
-```powershell
-Get-ADScoutUser | Select-Object SamAccountName, UserPrincipalName
-Find-ADScoutSPNAccount | Export-Csv .\spns.csv -NoTypeInformation
-Find-ADScoutPrivilegedUser -Recursive | Format-Table -AutoSize
+Invoke-ADScout -Server dc01.corp.local -Credential $cred -Gui
 ```

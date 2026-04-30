@@ -38,6 +38,62 @@ Internal helper used by ADScoutPS functions to create LDAP DirectoryEntry object
     return New-Object System.DirectoryServices.DirectoryEntry($Path)
 }
 
+function Get-ADScoutDomainContext {
+<#
+.SYNOPSIS
+Resolves the current Active Directory context.
+.DESCRIPTION
+Internal helper that follows the ADScoutPS auto-discovery pattern: use the current domain/PDC when available, then fall back to RootDSE. It returns the PDC/server, default naming context, and LDAP base path used by search functions.
+.PARAMETER Server
+Optional domain controller or LDAP server. When supplied, ADScoutPS builds LDAP paths against this server.
+.PARAMETER Credential
+Optional alternate domain credential for LDAP bind operations.
+#>
+    [CmdletBinding()]
+    param(
+        [string]$Server,
+        [PSCredential]$Credential
+    )
+
+    $pdc = $Server
+    $defaultNamingContext = $null
+    $source = 'RootDSE'
+
+    if (-not $Server -and -not $Credential) {
+        try {
+            $domainObj = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+            $pdc = $domainObj.PdcRoleOwner.Name
+            $source = 'CurrentDomain/PDC'
+        }
+        catch {
+            $pdc = $null
+            $source = 'RootDSE fallback'
+        }
+    }
+
+    try {
+        $rootDsePath = if ($pdc) { "LDAP://$pdc/RootDSE" } else { "LDAP://RootDSE" }
+        $rootDse = New-ADScoutDirectoryEntry -Path $rootDsePath -Credential $Credential
+        $defaultNamingContext = [string]$rootDse.Properties['defaultNamingContext'][0]
+    }
+    catch {
+        throw "Could not resolve AD domain context. $($_.Exception.Message)"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($defaultNamingContext)) {
+        throw "Could not resolve defaultNamingContext from Active Directory."
+    }
+
+    $ldapBasePath = if ($pdc) { "LDAP://$pdc/$defaultNamingContext" } else { "LDAP://$defaultNamingContext" }
+
+    [PSCustomObject]@{
+        Server               = $pdc
+        DefaultNamingContext = $defaultNamingContext
+        LdapBasePath         = $ldapBasePath
+        Source               = $source
+    }
+}
+
 function Get-ADScoutRootDSE {
 <#
 .SYNOPSIS
@@ -63,7 +119,7 @@ function Get-ADScoutSearchRoot {
 .SYNOPSIS
 Gets the default LDAP search root.
 .DESCRIPTION
-Internal helper that resolves defaultNamingContext from RootDSE and returns a DirectoryEntry for that domain naming context.
+Internal helper that auto-resolves the current domain/PDC/defaultNamingContext and returns a DirectoryEntry for the domain naming context.
 .PARAMETER Server
 Specifies a domain controller or LDAP server.
 .PARAMETER Credential
@@ -75,17 +131,8 @@ Specifies alternate domain credentials.
         [PSCredential]$Credential
     )
 
-    $rootDse = Get-ADScoutRootDSE -Server $Server -Credential $Credential
-    $baseDn = [string]$rootDse.Properties['defaultNamingContext'][0]
-
-    if ([string]::IsNullOrWhiteSpace($baseDn)) {
-        throw "Could not resolve defaultNamingContext from RootDSE."
-    }
-
-    if ($Server) { $path = "LDAP://$Server/$baseDn" }
-    else { $path = "LDAP://$baseDn" }
-
-    New-ADScoutDirectoryEntry -Path $path -Credential $Credential
+    $context = Get-ADScoutDomainContext -Server $Server -Credential $Credential
+    New-ADScoutDirectoryEntry -Path $context.LdapBasePath -Credential $Credential
 }
 
 function New-ADScoutSearcher {
@@ -176,7 +223,9 @@ For authorized lab environments and approved security assessments only.
     )
 
     try {
-        $root = Get-ADScoutRootDSE -Server $Server -Credential $Credential
+        $context = Get-ADScoutDomainContext -Server $Server -Credential $Credential
+        $rootPath = if ($context.Server) { "LDAP://$($context.Server)/RootDSE" } else { "LDAP://RootDSE" }
+        $root = New-ADScoutDirectoryEntry -Path $rootPath -Credential $Credential
 
         [PSCustomObject]@{
             DefaultNamingContext       = [string]$root.Properties['defaultNamingContext'][0]
@@ -185,7 +234,9 @@ For authorized lab environments and approved security assessments only.
             DnsHostName                = [string]$root.Properties['dnsHostName'][0]
             DomainFunctionality        = [string]$root.Properties['domainFunctionality'][0]
             ForestFunctionality        = [string]$root.Properties['forestFunctionality'][0]
-            Server                     = if ($Server) { $Server } else { 'Default logon server' }
+            Server                     = if ($context.Server) { $context.Server } else { 'Default logon server' }
+            LdapBasePath               = $context.LdapBasePath
+            DiscoverySource            = $context.Source
         }
     }
     catch {
@@ -477,29 +528,124 @@ This function reports gpLink strings and does not modify policy links.
     Get-ADScoutOU -Server $Server -Credential $Credential | Where-Object { $_.GpLink }
 }
 
+function ConvertTo-ADScoutLdapEscapedFilterValue {
+<#
+.SYNOPSIS
+Escapes an LDAP filter value.
+.DESCRIPTION
+Internal helper for safe LDAP filter construction.
+#>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Value
+    )
+
+    if ($null -eq $Value) { return $null }
+
+    return $Value.Replace('\','\5c').Replace('*','\2a').Replace('(','\28').Replace(')','\29').Replace([string][char]0,'\00')
+}
+
+function Resolve-ADScoutDistinguishedName {
+<#
+.SYNOPSIS
+Resolves a friendly object name or raw DN to a Distinguished Name.
+.DESCRIPTION
+Internal helper that lets ADScoutPS commands accept either a full DistinguishedName or easy input such as an OU, group, user, or computer name.
+.PARAMETER DistinguishedName
+Raw Distinguished Name. Returned as-is when supplied.
+.PARAMETER Identity
+Friendly name, sAMAccountName, CN, OU name, DNS host name, or partial distinguishedName.
+.PARAMETER ObjectClass
+Optional LDAP object class hint such as organizationalUnit, group, user, or computer.
+.PARAMETER Server
+Optional domain controller or LDAP server.
+.PARAMETER Credential
+Optional alternate domain credential.
+#>
+    [CmdletBinding()]
+    param(
+        [string]$DistinguishedName,
+        [string]$Identity,
+        [string]$ObjectClass,
+        [string]$Server,
+        [PSCredential]$Credential
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($DistinguishedName)) {
+        return $DistinguishedName
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Identity)) {
+        throw "Provide either -DistinguishedName or -Identity/-Name."
+    }
+
+    $escaped = ConvertTo-ADScoutLdapEscapedFilterValue -Value $Identity
+    $root = Get-ADScoutSearchRoot -Server $Server -Credential $Credential
+
+    $identityFilter = "(|(distinguishedName=$escaped)(name=$escaped)(cn=$escaped)(ou=$escaped)(samAccountName=$escaped)(dNSHostName=$escaped))"
+    if ($ObjectClass) {
+        $classFilter = if ($ObjectClass -eq 'user') { '(&(objectCategory=person)(objectClass=user))' } else { "(objectClass=$ObjectClass)" }
+        $filter = "(&$classFilter$identityFilter)"
+    }
+    else {
+        $filter = $identityFilter
+    }
+
+    $searcher = New-ADScoutSearcher -SearchRoot $root -Filter $filter -Properties @('distinguishedName','name','samAccountName','objectClass')
+    $searcher.SizeLimit = 5
+    $results = @($searcher.FindAll())
+
+    if ($results.Count -eq 0) {
+        throw "Could not resolve '$Identity' to a DistinguishedName. Try Get-ADScoutOU/Get-ADScoutGroup/Get-ADScoutUser first, or provide -DistinguishedName."
+    }
+
+    if ($results.Count -gt 1) {
+        $matches = $results | ForEach-Object { $_.Properties['distinguishedname'][0] }
+        Write-Warning "Multiple objects matched '$Identity'. Using first match. Matches: $($matches -join '; ')"
+    }
+
+    return [string]$results[0].Properties['distinguishedname'][0]
+}
+
 function Get-ADScoutObjectAcl {
 <#
 .SYNOPSIS
 Gets ACL entries for an Active Directory object.
 .DESCRIPTION
-Binds to an AD object by distinguishedName and returns Access Control Entries showing identity references, Active Directory rights, access type, inheritance, and object GUID values.
+Binds to an AD object by DistinguishedName or resolves a friendly -Identity/-Name automatically, then returns Access Control Entries showing identity references, Active Directory rights, access type, inheritance, and object GUID values.
 .PARAMETER DistinguishedName
 Distinguished Name of the AD object to inspect.
+.PARAMETER Identity
+Friendly object name to resolve automatically, such as Workstations, Domain Admins, a username, or a computer name.
+.PARAMETER ObjectClass
+Optional object class hint: organizationalUnit, group, user, or computer.
 .PARAMETER Server
 Specifies a domain controller or LDAP server to query.
 .PARAMETER Credential
 Specifies alternate domain credentials.
 .EXAMPLE
-Get-ADScoutObjectAcl -DistinguishedName "OU=Workstations,DC=corp,DC=local"
+Get-ADScoutObjectAcl -Name "Workstations" -ObjectClass organizationalUnit
 .EXAMPLE
-Get-ADScoutObjectAcl -DistinguishedName "CN=Domain Admins,CN=Users,DC=corp,DC=local" | Format-Table
+Get-ADScoutObjectAcl -Identity "Domain Admins" -ObjectClass group | Format-Table
+.EXAMPLE
+Get-ADScoutObjectAcl -DistinguishedName "OU=Workstations,DC=corp,DC=local"
 .NOTES
 This function is read-only and does not modify permissions.
 #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName='ByDistinguishedName')]
     param(
-        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [Parameter(ParameterSetName='ByDistinguishedName', ValueFromPipelineByPropertyName)]
+        [Alias('DN')]
         [string]$DistinguishedName,
+
+        [Parameter(ParameterSetName='ByIdentity')]
+        [Alias('Name')]
+        [string]$Identity,
+
+        [Parameter(ParameterSetName='ByIdentity')]
+        [ValidateSet('organizationalUnit','group','user','computer')]
+        [string]$ObjectClass,
 
         [string]$Server,
         [PSCredential]$Credential
@@ -507,13 +653,15 @@ This function is read-only and does not modify permissions.
 
     process {
         try {
-            $path = if ($Server) { "LDAP://$Server/$DistinguishedName" } else { "LDAP://$DistinguishedName" }
+            $resolvedDn = Resolve-ADScoutDistinguishedName -DistinguishedName $DistinguishedName -Identity $Identity -ObjectClass $ObjectClass -Server $Server -Credential $Credential
+            $context = Get-ADScoutDomainContext -Server $Server -Credential $Credential
+            $path = if ($context.Server) { "LDAP://$($context.Server)/$resolvedDn" } else { "LDAP://$resolvedDn" }
             $entry = New-ADScoutDirectoryEntry -Path $path -Credential $Credential
             $acl = $entry.ObjectSecurity
 
             foreach ($ace in $acl.Access) {
                 [PSCustomObject]@{
-                    TargetDistinguishedName = $DistinguishedName
+                    TargetDistinguishedName = $resolvedDn
                     IdentityReference       = $ace.IdentityReference.ToString()
                     ActiveDirectoryRights   = $ace.ActiveDirectoryRights.ToString()
                     AccessControlType       = $ace.AccessControlType.ToString()
@@ -525,7 +673,7 @@ This function is read-only and does not modify permissions.
             }
         }
         catch {
-            Write-Warning "Failed to read ACL for $DistinguishedName. $($_.Exception.Message)"
+            Write-Warning "Failed to read ACL. $($_.Exception.Message)"
         }
     }
 }
@@ -535,29 +683,44 @@ function Find-ADScoutInterestingAce {
 .SYNOPSIS
 Finds potentially interesting ACEs on an AD object.
 .DESCRIPTION
-Filters ACL entries for rights commonly reviewed during AD security assessments, including GenericAll, GenericWrite, WriteDacl, WriteOwner, ExtendedRight, CreateChild, DeleteChild, and WriteProperty.
+Filters ACL entries for rights commonly reviewed during AD security assessments, including GenericAll, GenericWrite, WriteDacl, WriteOwner, ExtendedRight, CreateChild, DeleteChild, and WriteProperty. Accepts either a raw DistinguishedName or an easy -Identity/-Name value.
 .PARAMETER DistinguishedName
 Distinguished Name of the AD object to inspect.
+.PARAMETER Identity
+Friendly object name to resolve automatically, such as Workstations, Domain Admins, a username, or a computer name.
+.PARAMETER ObjectClass
+Optional object class hint: organizationalUnit, group, user, or computer.
 .PARAMETER Server
 Specifies a domain controller or LDAP server to query.
 .PARAMETER Credential
 Specifies alternate domain credentials.
 .EXAMPLE
-Find-ADScoutInterestingAce -DistinguishedName "OU=Workstations,DC=corp,DC=local"
+Find-ADScoutInterestingAce -Name "Workstations" -ObjectClass organizationalUnit
+.EXAMPLE
+Find-ADScoutInterestingAce -Identity "Domain Admins" -ObjectClass group
 .NOTES
 This function is read-only and intended for authorized review.
 #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName='ByDistinguishedName')]
     param(
-        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [Parameter(ParameterSetName='ByDistinguishedName', ValueFromPipelineByPropertyName)]
+        [Alias('DN')]
         [string]$DistinguishedName,
+
+        [Parameter(ParameterSetName='ByIdentity')]
+        [Alias('Name')]
+        [string]$Identity,
+
+        [Parameter(ParameterSetName='ByIdentity')]
+        [ValidateSet('organizationalUnit','group','user','computer')]
+        [string]$ObjectClass,
 
         [string]$Server,
         [PSCredential]$Credential
     )
 
     process {
-        Get-ADScoutObjectAcl -DistinguishedName $DistinguishedName -Server $Server -Credential $Credential |
+        Get-ADScoutObjectAcl -DistinguishedName $DistinguishedName -Identity $Identity -ObjectClass $ObjectClass -Server $Server -Credential $Credential |
             Where-Object {
                 $_.ActiveDirectoryRights -match 'GenericAll|GenericWrite|WriteDacl|WriteOwner|ExtendedRight|CreateChild|DeleteChild|WriteProperty'
             }
@@ -757,6 +920,174 @@ This is a simple heuristic based on operatingSystem strings.
     }
 }
 
+function Test-ADScoutGridViewAvailable {
+<#
+.SYNOPSIS
+Tests whether Out-GridView is available in the current PowerShell session.
+#>
+    [CmdletBinding()]
+    param()
+    return [bool](Get-Command Out-GridView -ErrorAction SilentlyContinue)
+}
+
+function New-ADScoutFinding {
+<#
+.SYNOPSIS
+Creates a normalized ADScout finding object.
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Critical','High','Medium','Low','Info')][string]$Severity,
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][string]$Title,
+        [string]$Identity,
+        [string]$ObjectClass,
+        [string]$Reason,
+        [string]$Evidence,
+        [string]$DistinguishedName,
+        [object]$Source
+    )
+    [PSCustomObject]@{
+        Severity          = $Severity
+        Type              = $Type
+        Title             = $Title
+        Identity          = $Identity
+        ObjectClass       = $ObjectClass
+        Reason            = $Reason
+        Evidence          = $Evidence
+        DistinguishedName = $DistinguishedName
+        Source            = $Source
+    }
+}
+
+function Get-ADScoutFinding {
+<#
+.SYNOPSIS
+Builds normalized ADScout findings.
+.DESCRIPTION
+Runs the findings-focused review layer and returns normalized objects designed for sorting, filtering, export, and GUI review. This keeps manual CLI commands available while adding a higher-signal analysis layer on top.
+.PARAMETER Server
+Specifies a domain controller or LDAP server to query.
+.PARAMETER Credential
+Specifies alternate domain credentials.
+.PARAMETER SkipAclSweep
+Skips OU ACL/ACE review for faster findings collection.
+.EXAMPLE
+Get-ADScoutFinding -SkipAclSweep
+.EXAMPLE
+Get-ADScoutFinding | Sort-Object Severity,Type | Format-Table
+.NOTES
+This function is read-only and intended for authorized labs and approved assessments only.
+#>
+    [CmdletBinding()]
+    param(
+        [string]$Server,
+        [PSCredential]$Credential,
+        [switch]$SkipAclSweep
+    )
+
+    $findings = New-Object System.Collections.Generic.List[object]
+
+    try {
+        foreach ($spn in @(Find-ADScoutSPNAccount -Server $Server -Credential $Credential)) {
+            $findings.Add((New-ADScoutFinding -Severity 'Medium' -Type 'SPN' -Title 'SPN-bearing account found' -Identity $spn.SamAccountName -ObjectClass 'user/service' -Reason 'Accounts with SPNs are useful to review during Kerberoast-aware AD assessment workflows.' -Evidence $spn.ServicePrincipalName -DistinguishedName $spn.DistinguishedName -Source $spn))
+        }
+    } catch { Write-Warning "SPN findings failed. $($_.Exception.Message)" }
+
+    try {
+        foreach ($member in @(Find-ADScoutPrivilegedUser -Recursive -Server $Server -Credential $Credential)) {
+            $findings.Add((New-ADScoutFinding -Severity 'High' -Type 'PrivilegedMembership' -Title 'Privileged group membership found' -Identity $member.MemberDistinguishedName -ObjectClass 'member' -Reason "Member is listed under high-value group '$($member.Group)'." -Evidence "Group=$($member.Group); ParentGroup=$($member.ParentGroup)" -DistinguishedName $member.MemberDistinguishedName -Source $member))
+        }
+    } catch { Write-Warning "Privileged membership findings failed. $($_.Exception.Message)" }
+
+    try {
+        foreach ($item in @(Find-ADScoutDelegationHint -Server $Server -Credential $Credential)) {
+            $severity = if ($item.TrustedForDelegation -or $item.TrustedToAuthForDelegation) { 'High' } else { 'Medium' }
+            $title = if ($item.TrustedForDelegation -or $item.TrustedToAuthForDelegation) { 'Delegation-related flag found' } else { 'SPN/delegation-adjacent account found' }
+            $evidence = "UAC=$($item.UserAccountControl); TrustedForDelegation=$($item.TrustedForDelegation); TrustedToAuthForDelegation=$($item.TrustedToAuthForDelegation); HasSPN=$($item.HasSPN)"
+            $findings.Add((New-ADScoutFinding -Severity $severity -Type 'Delegation' -Title $title -Identity $item.SamAccountName -ObjectClass 'user/computer' -Reason 'Delegation-related configuration deserves focused review during AD assessment.' -Evidence $evidence -DistinguishedName $item.DistinguishedName -Source $item))
+        }
+    } catch { Write-Warning "Delegation findings failed. $($_.Exception.Message)" }
+
+    try {
+        foreach ($computer in @(Find-ADScoutOldComputer -Server $Server -Credential $Credential)) {
+            $findings.Add((New-ADScoutFinding -Severity 'Medium' -Type 'LegacyComputer' -Title 'Legacy operating system indicator' -Identity $computer.Name -ObjectClass 'computer' -Reason 'Older operating systems may indicate increased exposure or weaker baseline controls.' -Evidence $computer.OperatingSystem -DistinguishedName $computer.DistinguishedName -Source $computer))
+        }
+    } catch { Write-Warning "Legacy computer findings failed. $($_.Exception.Message)" }
+
+    if (-not $SkipAclSweep) {
+        try {
+            foreach ($ou in @(Get-ADScoutOU -Server $Server -Credential $Credential)) {
+                if ($ou.DistinguishedName) {
+                    foreach ($ace in @(Find-ADScoutInterestingAce -DistinguishedName $ou.DistinguishedName -Server $Server -Credential $Credential)) {
+                        $severity = if ($ace.ActiveDirectoryRights -match 'GenericAll|WriteDacl|WriteOwner') { 'Critical' } else { 'High' }
+                        $findings.Add((New-ADScoutFinding -Severity $severity -Type 'InterestingACE' -Title 'Interesting AD permission found' -Identity $ace.IdentityReference -ObjectClass 'acl/ace' -Reason 'ACE contains powerful rights commonly reviewed during AD permission analysis.' -Evidence $ace.ActiveDirectoryRights -DistinguishedName $ace.TargetDistinguishedName -Source $ace))
+                    }
+                }
+            }
+        } catch { Write-Warning "ACL/ACE findings failed. $($_.Exception.Message)" }
+    }
+
+    $rank = @{ Critical = 1; High = 2; Medium = 3; Low = 4; Info = 5 }
+    $findings | Sort-Object @{ Expression = { $rank[$_.Severity] } }, Type, Identity
+}
+
+function Show-ADScoutFindingsGui {
+<#
+.SYNOPSIS
+Opens the ADScout findings-first GUI dashboard.
+.DESCRIPTION
+Collects normalized ADScout findings and displays only the high-signal results in Out-GridView. If Out-GridView is unavailable, it falls back to a sorted console table.
+.PARAMETER Server
+Specifies a domain controller or LDAP server to query.
+.PARAMETER Credential
+Specifies alternate domain credentials.
+.PARAMETER SkipAclSweep
+Skips OU ACL/ACE review for faster findings collection.
+.PARAMETER PassThru
+Returns the findings after displaying them.
+.EXAMPLE
+Show-ADScoutFindingsGui -SkipAclSweep
+.EXAMPLE
+Invoke-ADScout -Gui -SkipAclSweep
+.NOTES
+Out-GridView is Windows/UI dependent. Server Core or non-GUI sessions will use console fallback.
+#>
+    [CmdletBinding()]
+    param(
+        [string]$Server,
+        [PSCredential]$Credential,
+        [switch]$SkipAclSweep,
+        [switch]$PassThru
+    )
+
+    Write-Host "[*] Building ADScout findings dashboard..." -ForegroundColor Cyan
+    $findings = @(Get-ADScoutFinding -Server $Server -Credential $Credential -SkipAclSweep:$SkipAclSweep)
+
+    $critical = @($findings | Where-Object Severity -eq 'Critical').Count
+    $high     = @($findings | Where-Object Severity -eq 'High').Count
+    $medium   = @($findings | Where-Object Severity -eq 'Medium').Count
+
+    Write-Host "[!] Critical: $critical" -ForegroundColor Red
+    Write-Host "[!] High:     $high" -ForegroundColor Yellow
+    Write-Host "[!] Medium:   $medium" -ForegroundColor DarkYellow
+    Write-Host "[*] Total findings: $($findings.Count)" -ForegroundColor Cyan
+
+    if ($findings.Count -eq 0) {
+        Write-Host '[+] No findings produced by the current checks.' -ForegroundColor Green
+        return
+    }
+
+    if (Test-ADScoutGridViewAvailable) {
+        $findings | Select-Object Severity,Type,Title,Identity,ObjectClass,Reason,Evidence,DistinguishedName | Out-GridView -Title 'ADScoutPS Findings Dashboard - Critical/High/Medium Review'
+    } else {
+        Write-Warning 'Out-GridView is not available in this session. Showing console table instead.'
+        $findings | Select-Object Severity,Type,Title,Identity,Evidence | Format-Table -AutoSize
+    }
+
+    if ($PassThru) { return $findings }
+}
+
 function Invoke-ADScout {
 <#
 .SYNOPSIS
@@ -773,6 +1104,10 @@ Directory where results are written.
 Specifies output format. Valid values: CSV, JSON, Both.
 .PARAMETER SkipAclSweep
 Skips ACL/ACE enumeration for faster collection.
+.PARAMETER Gui
+Opens the findings-first GUI dashboard after collection. The CLI/manual functions remain unchanged.
+.EXAMPLE
+Invoke-ADScout -Gui -SkipAclSweep
 .EXAMPLE
 Invoke-ADScout -SkipAclSweep
 .EXAMPLE
@@ -790,7 +1125,8 @@ For authorized lab environments and approved security assessments only.
         [string]$OutputPath = ".\ADScout-Results",
         [ValidateSet('CSV','JSON','Both')]
         [string]$OutputFormat = 'Both',
-        [switch]$SkipAclSweep
+        [switch]$SkipAclSweep,
+        [switch]$Gui
     )
 
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -813,6 +1149,7 @@ For authorized lab environments and approved security assessments only.
     $collections.PrivilegedUsers = @(Find-ADScoutPrivilegedUser -Recursive -Server $Server -Credential $Credential)
     $collections.DelegationHints = @(Find-ADScoutDelegationHint -Server $Server -Credential $Credential)
     $collections.OldComputers = @(Find-ADScoutOldComputer -Server $Server -Credential $Credential)
+    $collections.Findings = @(Get-ADScoutFinding -Server $Server -Credential $Credential -SkipAclSweep:$SkipAclSweep)
 
     if (-not $SkipAclSweep) {
         $aceResults = @()
@@ -860,6 +1197,23 @@ For authorized lab environments and approved security assessments only.
 
     Write-Host "[+] Collection complete: $runPath" -ForegroundColor Green
 
+    if ($Gui) {
+        $dashboardData = @($collections.Findings)
+        if ($dashboardData.Count -gt 0) {
+            Write-Host "[*] Opening findings-first GUI dashboard..." -ForegroundColor Cyan
+            if (Test-ADScoutGridViewAvailable) {
+                $dashboardData | Select-Object Severity,Type,Title,Identity,ObjectClass,Reason,Evidence,DistinguishedName | Out-GridView -Title 'ADScoutPS Findings Dashboard - Critical/High/Medium Review'
+            }
+            else {
+                Write-Warning 'Out-GridView is not available in this session. Showing console table instead.'
+                $dashboardData | Select-Object Severity,Type,Title,Identity,Evidence | Format-Table -AutoSize
+            }
+        }
+        else {
+            Write-Host '[+] No GUI findings produced by the current checks.' -ForegroundColor Green
+        }
+    }
+
     [PSCustomObject]@{
         OutputPath = $runPath
         DomainInfo = $collections.DomainInfo.Count
@@ -873,8 +1227,10 @@ For authorized lab environments and approved security assessments only.
         PrivilegedUsers = $collections.PrivilegedUsers.Count
         DelegationHints = $collections.DelegationHints.Count
         OldComputers = $collections.OldComputers.Count
+        Findings = $collections.Findings.Count
         InterestingACEs = if ($collections.Contains('InterestingACEs')) { $collections.InterestingACEs.Count } else { 0 }
     }
+
 }
 
 # Load tab-completion support
@@ -899,5 +1255,7 @@ Export-ModuleMember -Function @(
     'Find-ADScoutPrivilegedUser',
     'Find-ADScoutDelegationHint',
     'Find-ADScoutOldComputer',
+    'Get-ADScoutFinding',
+    'Show-ADScoutFindingsGui',
     'Invoke-ADScout'
 )

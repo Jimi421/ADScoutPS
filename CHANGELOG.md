@@ -1,32 +1,21 @@
 # Changelog
 
-## v0.4.0
+## v0.6.0 - Findings GUI
 
-- Added comment-based help to exported functions.
-- Added tab completion support through `ADScoutPS.Completion.ps1`.
-- Added completion for `Invoke-ADScout -OutputFormat`.
-- Added completion for `Invoke-ADScout -OutputPath`.
-- Added live LDAP-backed completion for `-DistinguishedName` where supported.
-- Added live LDAP-backed completion for `Get-ADScoutGroupMember -Identity`.
-- Improved README and usage documentation.
+- Added `Invoke-ADScout -Gui`
+- Added `Get-ADScoutFinding`
+- Added `Show-ADScoutFindingsGui`
+- Added normalized finding objects with Severity, Type, Title, Reason, Evidence, and DistinguishedName
+- Added findings export to Invoke-ADScout output
+- Preserved all manual CLI enumeration functions
 
-## v0.3.0
+## v0.5.0 - Auto Domain
 
-- Added `Invoke-ADScout` easy-mode collection.
-- Added CSV / JSON export support.
-- Added Markdown summary output.
-- Added `-Server` and `-Credential` support.
-- Added recursive group membership and privileged membership review.
+- Added current domain/PDC/base DN auto-discovery
+- Added friendly identity/name ACL targeting
+- Preserved raw DistinguishedName targeting
 
-## v0.2.0
+## v0.4.0 - Help + Completion
 
-- Added GPO discovery.
-- Added OU discovery.
-- Added linked GPO review.
-- Added ACL / ACE inspection.
-- Added interesting ACE filtering.
-
-## v0.1.0
-
-- Initial ADScoutPS module.
-- Added domain, user, group, computer, admin group, and SPN account enumeration.
+- Added comment-based help
+- Added tab completion support

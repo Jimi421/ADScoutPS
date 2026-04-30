@@ -1,15 +1,10 @@
-# ADScoutPS Quickstart
-# Run from the repository root on an authorized Windows/domain-connected lab machine.
+Import-Module "$PSScriptRoot\..\ADScoutPS\ADScoutPS.psd1" -Force
 
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-Import-Module .\ADScoutPS\ADScoutPS.psd1 -Force
+# Fast findings-first GUI review
+Invoke-ADScout -Gui -SkipAclSweep
 
+# Manual follow-up examples
 Get-ADScoutDomainInfo
-Get-ADScoutUser | Select-Object -First 10
-Get-ADScoutGroup | Select-Object -First 10
-Get-ADScoutComputer | Select-Object -First 10
 Find-ADScoutSPNAccount
 Find-ADScoutPrivilegedUser -Recursive
-
-# Fast one-command collection:
-Invoke-ADScout -SkipAclSweep
+Find-ADScoutDelegationHint
