@@ -1,0 +1,11 @@
+# PowerShell / output
+ADScout-Results/
+*.zip
+*.log
+*.tmp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
