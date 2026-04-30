@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.0 - Bugfix
+
+- Fixed findings engine strict-mode errors when delegation objects do not expose SamAccountName.
+- Fixed ambiguous parameter-set call in Find-ADScoutInterestingAce / DCSync-related ACL path.
+- Updated standalone runner banner to v1.1.
+- Added a guard so accidental Import-Module of ADScout.ps1 does not immediately run collection. Dot-source with -LoadOnly is still the recommended manual workflow.
+
 ## v1.0.0 - OperatorReady
 
 - Preserves v0.9 CleanOps functionality.

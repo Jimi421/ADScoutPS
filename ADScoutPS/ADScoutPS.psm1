@@ -1,5 +1,5 @@
 <#
-ADScoutPS v1.0.0 - PowerShell Active Directory Enumeration Toolkit
+ADScoutPS v1.1.0 - PowerShell Active Directory Enumeration Toolkit
 Read-only enumeration for authorized lab environments and approved internal assessments only.
 #>
 
@@ -456,8 +456,16 @@ Finds powerful ACEs on a target object or domain root.
 #>
     [CmdletBinding()]
     param([string]$DistinguishedName,[string]$Identity,[string]$ObjectClass='*',[string]$Server,[PSCredential]$Credential,[string]$SearchBase)
-    if (-not $DistinguishedName -and -not $Identity) { $DistinguishedName = (Get-ADScoutDomainContext -Server $Server -Credential $Credential -SearchBase $SearchBase).SearchBase }
-    Get-ADScoutObjectAcl -DistinguishedName $DistinguishedName -Identity $Identity -ObjectClass $ObjectClass -Server $Server -Credential $Credential -SearchBase $SearchBase | Where-Object { $_.ActiveDirectoryRights -match 'GenericAll|GenericWrite|WriteDacl|WriteOwner|ExtendedRight|CreateChild|DeleteChild|WriteProperty' }
+    $aclParams = @{ Server=$Server; Credential=$Credential; SearchBase=$SearchBase }
+    if ($DistinguishedName) {
+        $aclParams['DistinguishedName'] = $DistinguishedName
+    } elseif ($Identity) {
+        $aclParams['Identity'] = $Identity
+        $aclParams['ObjectClass'] = $ObjectClass
+    } else {
+        $aclParams['DistinguishedName'] = (Get-ADScoutDomainContext -Server $Server -Credential $Credential -SearchBase $SearchBase).SearchBase
+    }
+    Get-ADScoutObjectAcl @aclParams | Where-Object { $_.ActiveDirectoryRights -match 'GenericAll|GenericWrite|WriteDacl|WriteOwner|ExtendedRight|CreateChild|DeleteChild|WriteProperty' }
 }
 
 function Find-ADScoutDCSyncRight {
@@ -632,6 +640,26 @@ function New-ADScoutFinding {
     [PSCustomObject]@{ Severity=$Severity; Category=$Category; Title=$Title; Target=$Target; Evidence=$Evidence; WhyItMatters=$WhyItMatters; RecommendedReview=$RecommendedReview; SourceCommand=$SourceCommand; DistinguishedName=$DistinguishedName }
 }
 
+function Get-ADScoutObjectDisplayName {
+<#
+.SYNOPSIS
+Returns the best available display identifier for an ADScout object.
+.DESCRIPTION
+Used by the findings engine to avoid strict-mode property errors when different object types expose different property names.
+#>
+    [CmdletBinding()]
+    param([Parameter(Mandatory,ValueFromPipeline)]$InputObject)
+    process {
+        foreach ($propertyName in @('SamAccountName','MemberSamAccountName','Name','Member','DnsHostName','IdentityReference','DistinguishedName')) {
+            $value = Get-ADScoutSafeProperty -InputObject $InputObject -Name $propertyName
+            if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
+                return [string]$value
+            }
+        }
+        return '<unknown>'
+    }
+}
+
 function Get-ADScoutFinding {
 <#
 .SYNOPSIS
@@ -640,15 +668,15 @@ Returns normalized findings sorted by operational priority.
     [CmdletBinding()]
     param([string]$Server,[PSCredential]$Credential,[string]$SearchBase,[switch]$SkipAclSweep)
     $f = New-Object System.Collections.Generic.List[object]
-    foreach ($x in Find-ADScoutASREPAccount -Server $Server -Credential $Credential -SearchBase $SearchBase) { $f.Add((New-ADScoutFinding 'Critical' 'Kerberos' 'AS-REP roast candidate' $x.SamAccountName $x.UacFlags 'Kerberos preauthentication is disabled for this account.' 'Review whether preauthentication should be required and whether the account is still needed.' 'Find-ADScoutASREPAccount' $x.DistinguishedName)) }
-    foreach ($x in Find-ADScoutUnconstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) { $f.Add((New-ADScoutFinding 'Critical' 'Delegation' 'Unconstrained delegation account' $x.SamAccountName $x.UacFlags 'Unconstrained delegation can expose delegated authentication material if the account/host is compromised.' 'Confirm business need and review delegation configuration.' 'Find-ADScoutUnconstrainedDelegation' $x.DistinguishedName)) }
-    foreach ($x in Find-ADScoutConstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) { $sev=if($x.Type -eq 'RBCD'){'High'}else{'Medium'}; $f.Add((New-ADScoutFinding $sev 'Delegation' "$($x.Type) delegation configured" $x.SamAccountName $x.DelegatesTo 'Delegation configuration should be reviewed as part of AD attack-path analysis.' 'Validate target services/principals and intended administration model.' 'Find-ADScoutConstrainedDelegation' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutASREPAccount -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $f.Add((New-ADScoutFinding 'Critical' 'Kerberos' 'AS-REP roast candidate' $target $x.UacFlags 'Kerberos preauthentication is disabled for this account.' 'Review whether preauthentication should be required and whether the account is still needed.' 'Find-ADScoutASREPAccount' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutUnconstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $f.Add((New-ADScoutFinding 'Critical' 'Delegation' 'Unconstrained delegation account' $target $x.UacFlags 'Unconstrained delegation can expose delegated authentication material if the account/host is compromised.' 'Confirm business need and review delegation configuration.' 'Find-ADScoutUnconstrainedDelegation' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutConstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $sev=if($x.Type -eq 'RBCD'){'High'}else{'Medium'}; $f.Add((New-ADScoutFinding $sev 'Delegation' "$($x.Type) delegation configured" $target $x.DelegatesTo 'Delegation configuration should be reviewed as part of AD attack-path analysis.' 'Validate target services/principals and intended administration model.' 'Find-ADScoutConstrainedDelegation' $x.DistinguishedName)) }
     if (-not $SkipAclSweep) { foreach ($x in Find-ADScoutDCSyncRight -Server $Server -Credential $Credential -SearchBase $SearchBase) { $f.Add((New-ADScoutFinding 'Critical' 'ACL' 'DCSync-capable replication right' $x.IdentityReference $x.RightName 'Replication rights on the domain root are highly sensitive.' 'Review whether this principal should have directory replication permissions.' 'Find-ADScoutDCSyncRight' $x.DistinguishedName)) } }
     foreach ($x in Get-ADScoutPasswordPolicy -Server $Server -Credential $Credential -SearchBase $SearchBase | Where-Object { (Get-ADScoutSafeProperty -InputObject $_ -Name 'LockoutDisabled') -eq $true -or ((Get-ADScoutSafeProperty -InputObject $_ -Name 'MinPwdLength') -ne $null -and [int](Get-ADScoutSafeProperty -InputObject $_ -Name 'MinPwdLength') -lt 12) }) { $f.Add((New-ADScoutFinding 'High' 'Policy' 'Password policy review item' $x.Name "MinPwdLength=$($x.MinPwdLength); LockoutThreshold=$($x.LockoutThreshold)" 'Weak password or lockout policy settings can increase account abuse risk.' 'Review password and lockout policy against organizational standards.' 'Get-ADScoutPasswordPolicy' $x.DistinguishedName)) }
     foreach ($x in Get-ADScoutDomainTrust -Server $Server -Credential $Credential -SearchBase $SearchBase) { $f.Add((New-ADScoutFinding 'Info' 'Trust' 'Domain trust present' $x.Name "Direction=$($x.TrustDirection); Type=$($x.TrustType); Attr=$($x.TrustAttributes)" 'Trusts expand the AD security boundary and should be mapped.' 'Review trust direction, transitivity, and SID filtering configuration.' 'Get-ADScoutDomainTrust' $x.DistinguishedName)) }
     foreach ($x in Find-ADScoutAdminSDHolderOrphan -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target=if($x.SamAccountName){$x.SamAccountName}else{$x.Name}; $f.Add((New-ADScoutFinding 'Medium' 'Privilege' 'adminCount=1 object' $target $x.ObjectClass 'adminCount=1 may indicate current or historical privileged protection.' 'Review whether object is still privileged and whether ACL inheritance is appropriate.' 'Find-ADScoutAdminSDHolderOrphan' $x.DistinguishedName)) }
-    foreach ($x in Find-ADScoutWeakUacFlag -Server $Server -Credential $Credential -SearchBase $SearchBase) { $sev=if($x.UacFlags -match 'ENCRYPTED_TEXT_PWD_ALLOWED|PASSWD_NOTREQD'){'High'}else{'Medium'}; $f.Add((New-ADScoutFinding $sev 'AccountControl' 'Weak/review-worthy UAC flag' $x.SamAccountName $x.UacFlags 'UAC flags can reveal relaxed authentication or password controls.' 'Review whether these flags are required.' 'Find-ADScoutWeakUacFlag' $x.DistinguishedName)) }
-    foreach ($x in Get-ADScoutLapsStatus -Server $Server -Credential $Credential -SearchBase $SearchBase | Where-Object { -not $_.HasLegacyLaps -and -not $_.HasWindowsLaps }) { $f.Add((New-ADScoutFinding 'Medium' 'Endpoint' 'No visible LAPS metadata' $x.Name $x.DnsHostName 'Systems without visible LAPS metadata may need local admin password management review.' 'Confirm whether LAPS or another local admin password control is deployed.' 'Get-ADScoutLapsStatus' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutWeakUacFlag -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $sev=if($x.UacFlags -match 'ENCRYPTED_TEXT_PWD_ALLOWED|PASSWD_NOTREQD'){'High'}else{'Medium'}; $f.Add((New-ADScoutFinding $sev 'AccountControl' 'Weak/review-worthy UAC flag' $target $x.UacFlags 'UAC flags can reveal relaxed authentication or password controls.' 'Review whether these flags are required.' 'Find-ADScoutWeakUacFlag' $x.DistinguishedName)) }
+    foreach ($x in Get-ADScoutLapsStatus -Server $Server -Credential $Credential -SearchBase $SearchBase | Where-Object { -not $_.HasLegacyLaps -and -not $_.HasWindowsLaps }) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $f.Add((New-ADScoutFinding 'Medium' 'Endpoint' 'No visible LAPS metadata' $target $x.DnsHostName 'Systems without visible LAPS metadata may need local admin password management review.' 'Confirm whether LAPS or another local admin password control is deployed.' 'Get-ADScoutLapsStatus' $x.DistinguishedName)) }
     if (-not $SkipAclSweep) { foreach ($x in Find-ADScoutInterestingAce -Server $Server -Credential $Credential -SearchBase $SearchBase) { $f.Add((New-ADScoutFinding 'High' 'ACL' 'Interesting ACE' $x.IdentityReference $x.ActiveDirectoryRights 'Powerful ACEs can indicate delegated control paths.' 'Review whether the delegated permission is expected and least-privilege.' 'Find-ADScoutInterestingAce' $x.DistinguishedName)) } }
     $rank=@{Critical=0;High=1;Medium=2;Low=3;Info=4}; $f | Sort-Object @{Expression={$rank[$_.Severity]}},Category,Title,Target
 }
@@ -682,7 +710,7 @@ Invoke-ADScout -Gui -OutputFormat Both
     [CmdletBinding()]
     param([string]$Server,[PSCredential]$Credential,[string]$SearchBase,[string]$OutputPath='ADScout-Results',[ValidateSet('CSV','JSON','Both')][string]$OutputFormat='Both',[switch]$SkipAclSweep,[switch]$Gui)
     $timestamp=Get-Date -Format 'yyyyMMdd-HHmmss'; $runPath=Join-Path $OutputPath "Run-$timestamp"; New-Item -ItemType Directory -Path $runPath -Force | Out-Null
-    Write-Host '[*] ADScoutPS v0.9 collection starting...' -ForegroundColor Cyan
+    Write-Host '[*] ADScoutPS v1.1 collection starting...' -ForegroundColor Cyan
     $data=[ordered]@{}
     $data.DomainInfo=@(Get-ADScoutDomainInfo -Server $Server -Credential $Credential -SearchBase $SearchBase)
     $data.DomainControllers=@(Get-ADScoutDomainController -Server $Server -Credential $Credential -SearchBase $SearchBase)

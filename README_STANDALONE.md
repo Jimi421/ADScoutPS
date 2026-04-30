@@ -36,3 +36,15 @@ Find-ADScoutWeakUacFlag
 - Use `-SkipAclSweep` first for a faster, lower-noise run.
 - Use CLI output as the source of truth if GUI mode is unavailable.
 - Keep the generated `ADScout-Results` folder for notes and screenshots.
+
+
+## v1.1 note
+
+If you want manual commands from the standalone file, use dot-sourcing:
+
+```powershell
+. .\ADScout.ps1 -LoadOnly
+Get-ADScoutDomainInfo
+```
+
+Avoid `Import-Module .\ADScout.ps1`; use the module manifest for module mode or dot-source the standalone file.
