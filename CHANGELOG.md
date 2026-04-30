@@ -1,26 +1,27 @@
 # Changelog
 
+## v1.0.0 - OperatorReady
+
+- Preserves v0.9 CleanOps functionality.
+- Adds a more operator-focused README with practical workflows.
+- Expands usage documentation for module mode, standalone mode, GUI findings review, group review, and troubleshooting.
+- Keeps manual CLI functionality, findings-first GUI, exports, and standalone runner intact.
+
+## v0.9.0 - CleanOps
+
+- Preserves v0.7 attack-path findings and v0.6 GUI behavior.
+- Adds clean recursive group/member output.
+- Adds `Get-ADScoutGroupReport`.
+- Adds privileged group member export during `Invoke-ADScout`.
+- Fixes noisy StrictMode/property errors when user objects do not have computer-only properties such as `PrimaryGroupId`.
+- Hardens password policy parsing.
+- Reduces duplicate raw ACL collection in `Invoke-ADScout`.
+- Keeps CLI/manual workflow intact.
+
 ## v0.7.0
 
-- Added normalized attack-path findings engine.
-- Added AS-REP roast candidate detection via `DONT_REQUIRE_PREAUTH`.
-- Added unconstrained delegation detection with non-DC filtering by default.
-- Added constrained delegation review for KCD and RBCD indicators.
-- Added DCSync-right detection for domain-root replication GUIDs.
-- Added domain trust enumeration.
-- Added domain controller enumeration.
-- Added default and fine-grained password policy review.
-- Added `adminCount=1` privileged-object review.
-- Added weak UAC flag sweep and `ConvertTo-ADScoutUacFlag` helper.
-- Added LAPS visibility review per computer.
-- Preserved manual CLI commands and `Invoke-ADScout -Gui` findings dashboard.
-- Rebuilt module core for consistent `-Server`, `-Credential`, and `-SearchBase` support.
+- Added AS-REP candidates, delegation review, DCSync detection, trusts, DCs, password policy, adminCount review, weak UAC flag sweep, LAPS status, and normalized findings.
 
 ## v0.6.0
 
-- Added findings-first GUI mode.
-- Added normalized basic findings output.
-
-## v0.5.0
-
-- Added auto domain/PDC/base DN discovery.
+- Added findings-first GUI dashboard with `Out-GridView`.

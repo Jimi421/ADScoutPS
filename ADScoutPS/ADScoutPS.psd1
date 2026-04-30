@@ -1,6 +1,6 @@
 @{
     RootModule        = 'ADScoutPS.psm1'
-    ModuleVersion     = '0.7.0'
+    ModuleVersion     = '1.0.0'
     GUID              = 'b88ad47a-cc7e-4d7b-9735-8f50e1af6a44'
     Author            = 'Braxton Bailey'
     CompanyName       = 'Community'
@@ -32,6 +32,7 @@
         'Get-ADScoutObjectAcl',
         'Find-ADScoutInterestingAce',
         'Get-ADScoutGroupMember',
+        'Get-ADScoutGroupReport',
         'Find-ADScoutPrivilegedUser',
         'Find-ADScoutDelegationHint',
         'Find-ADScoutOldComputer',
@@ -47,7 +48,7 @@
             Tags = @('ActiveDirectory','LDAP','PowerShell','OSCP','Security','Enumeration','ACL','GPO','Kerberos')
             LicenseUri = 'https://opensource.org/licenses/MIT'
             ProjectUri = 'https://github.com/jimi421/ADScoutPS'
-            ReleaseNotes = 'v0.7.0 adds attack-path findings: AS-REP candidates, delegation review, DCSync-right detection, trusts, DCs, password policy, adminCount review, UAC flag sweep, LAPS status, and improved findings output.'
+            ReleaseNotes = 'v1.0.0 OperatorReady preserves v0.9 CleanOps functionality and adds operator-focused README/usage documentation for CLI, GUI, standalone mode, findings, and group review workflows.'
         }
     }
 }

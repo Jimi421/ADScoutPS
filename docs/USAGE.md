@@ -1,57 +1,105 @@
-# ADScoutPS Usage
+# ADScoutPS Usage Guide
 
-## Import
+This guide is written for practical lab and authorized assessment use.
+
+## Load the Module
 
 ```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Import-Module .\ADScoutPS\ADScoutPS.psd1 -Force
+Get-Command -Module ADScoutPS
 ```
 
-## Recommended Workflow
-
-Fast, low-friction collection:
+## Fastest Useful Workflow
 
 ```powershell
+Get-ADScoutDomainInfo
 Invoke-ADScout -SkipAclSweep
+Get-ADScoutFinding
 ```
 
-Findings dashboard:
+## GUI Findings Review
 
 ```powershell
 Invoke-ADScout -Gui -SkipAclSweep
 ```
 
-Full review including ACL/DCSync checks:
+If `Out-GridView` is unavailable, use:
 
 ```powershell
-Invoke-ADScout -Gui
+Get-ADScoutFinding |
+Format-Table Severity, Category, Title, Target -AutoSize
 ```
 
-## Findings First
+## Group / Nested Membership Review
+
+List groups:
 
 ```powershell
-Get-ADScoutFinding | Sort-Object Severity,Category,Title
-Get-ADScoutFinding | Export-Csv .\findings.csv -NoTypeInformation
-Get-ADScoutFinding | Show-ADScoutFindingsGui
+Get-ADScoutGroup | Select-Object Name | Sort-Object Name
 ```
 
-## Focus Areas
+Review one group recursively:
+
+```powershell
+Get-ADScoutGroupMember -Identity "Domain Admins" -Recursive |
+Format-Table RootGroup, ParentGroup, MemberSamAccountName, MemberObjectClass, Depth, Path -AutoSize
+```
+
+Clean privileged group report:
+
+```powershell
+Get-ADScoutGroupReport -PrivilegedOnly -Recursive |
+Format-Table Group, ParentGroup, Member, MemberType, Depth -AutoSize
+```
+
+Export it:
+
+```powershell
+Get-ADScoutGroupReport -PrivilegedOnly -Recursive |
+Export-Csv .\privileged_group_members.csv -NoTypeInformation
+```
+
+## Attack-Path Review Commands
 
 ```powershell
 Find-ADScoutASREPAccount
 Find-ADScoutSPNAccount
+Find-ADScoutWeakUacFlag
 Find-ADScoutUnconstrainedDelegation
 Find-ADScoutConstrainedDelegation
 Find-ADScoutDCSyncRight
-Find-ADScoutWeakUacFlag
 Find-ADScoutAdminSDHolderOrphan
+Get-ADScoutLapsStatus
 Get-ADScoutPasswordPolicy
 Get-ADScoutDomainTrust
-Get-ADScoutLapsStatus
 ```
 
-## Target a Specific DC
+## ACL / ACE Review
 
 ```powershell
-$cred = Get-Credential
-Invoke-ADScout -Server dc01.corp.local -Credential $cred -SearchBase "DC=corp,DC=local"
+Get-ADScoutObjectAcl -Name "Workstations" -ObjectClass organizationalUnit
+Find-ADScoutInterestingAce -Name "Workstations" -ObjectClass organizationalUnit
 ```
+
+Raw DN style also works:
+
+```powershell
+Get-ADScoutObjectAcl -DistinguishedName "OU=Workstations,DC=corp,DC=local"
+```
+
+## Standalone Mode
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -SkipAclSweep
+powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -Gui -SkipAclSweep
+. .\ADScout.ps1 -LoadOnly
+```
+
+## Output
+
+```powershell
+Invoke-ADScout -OutputPath .\ADScout-Results -OutputFormat Both -SkipAclSweep
+```
+
+Output includes findings, users, groups, computers, domain controllers, privileged group members, and a summary file.

@@ -231,3 +231,46 @@ Register-ArgumentCompleter -CommandName Get-ADScoutObjectAcl,Find-ADScoutInteres
         return
     }
 }
+
+
+Register-ArgumentCompleter -CommandName Get-ADScoutGroupReport -ParameterName GroupName -ScriptBlock {
+    param($commandName, $parameterName, $wordToComplete)
+
+    try {
+        $root = [ADSI]'LDAP://RootDSE'
+        $baseDn = $root.defaultNamingContext
+        if (-not $baseDn) { return }
+
+        $searchRoot = [ADSI]"LDAP://$baseDn"
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher($searchRoot)
+        $searcher.PageSize = 50
+        $searcher.SizeLimit = 25
+
+        $safeWord = $wordToComplete.Replace('\','\5c').Replace('*','\2a').Replace('(','\28').Replace(')','\29').Replace("'", '')
+        if ([string]::IsNullOrWhiteSpace($safeWord)) {
+            $searcher.Filter = '(objectClass=group)'
+        }
+        else {
+            $searcher.Filter = "(&(objectClass=group)(|(name=*$safeWord*)(samAccountName=*$safeWord*)))"
+        }
+
+        [void]$searcher.PropertiesToLoad.Add('name')
+        [void]$searcher.PropertiesToLoad.Add('distinguishedName')
+
+        foreach ($result in $searcher.FindAll()) {
+            if ($result.Properties.Contains('name')) {
+                $name = $result.Properties.name[0].ToString()
+                $dn = if ($result.Properties.Contains('distinguishedname')) { $result.Properties.distinguishedname[0].ToString() } else { $name }
+                [System.Management.Automation.CompletionResult]::new(
+                    "'$name'",
+                    $name,
+                    'ParameterValue',
+                    $dn
+                )
+            }
+        }
+    }
+    catch {
+        return
+    }
+}

@@ -1,10 +1,9 @@
-Import-Module "$PSScriptRoot\..\ADScoutPS\ADScoutPS.psd1" -Force
+Import-Module .\ADScoutPS\ADScoutPS.psd1 -Force
 
-# Fast first pass
+Get-ADScoutDomainInfo
 Invoke-ADScout -SkipAclSweep
+Get-ADScoutFinding -SkipAclSweep
 
-# Findings dashboard where Out-GridView is available
-Invoke-ADScout -Gui -SkipAclSweep
-
-# Manual finding review
-Get-ADScoutFinding | Sort-Object Severity,Category,Title
+# Clean nested group review
+Get-ADScoutGroupReport -PrivilegedOnly -Recursive |
+    Format-Table Group,ParentGroup,Member,MemberType,Depth -AutoSize

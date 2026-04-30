@@ -1,4 +1,27 @@
 <#
+ADScoutPS Standalone Runner
+Read-only Active Directory enumeration for authorized labs and approved assessments only.
+
+Examples:
+  powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -SkipAclSweep
+  powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -Gui -SkipAclSweep
+  . .\ADScout.ps1 -LoadOnly
+  Get-ADScoutGroupReport -PrivilegedOnly -Recursive
+#>
+
+param(
+    [switch]$LoadOnly,
+    [switch]$Gui,
+    [switch]$SkipAclSweep,
+    [string]$Server,
+    [PSCredential]$Credential,
+    [string]$SearchBase,
+    [string]$OutputPath = 'ADScout-Results',
+    [ValidateSet('CSV','JSON','Both')]
+    [string]$OutputFormat = 'Both'
+)
+
+<#
 ADScoutPS v1.0.0 - PowerShell Active Directory Enumeration Toolkit
 Read-only enumeration for authorized lab environments and approved internal assessments only.
 #>
@@ -712,10 +735,8 @@ Invoke-ADScout -Gui -OutputFormat Both
     [PSCustomObject]@{ OutputPath=$runPath; Findings=$data.Findings.Count; Critical=@($data.Findings | Where-Object Severity -eq 'Critical').Count; High=@($data.Findings | Where-Object Severity -eq 'High').Count; Users=$data.Users.Count; Computers=$data.Computers.Count; DomainControllers=$data.DomainControllers.Count }
 }
 
-# Load tab-completion support
-$completionPath = Join-Path $PSScriptRoot 'ADScoutPS.Completion.ps1'
-if (Test-Path $completionPath) { . $completionPath }
 
-Export-ModuleMember -Function @(
-    'ConvertTo-ADScoutUacFlag','Get-ADScoutDomainInfo','Get-ADScoutUser','Get-ADScoutGroup','Get-ADScoutComputer','Get-ADScoutDomainController','Get-ADScoutDomainTrust','Get-ADScoutPasswordPolicy','Get-ADScoutLapsStatus','Find-ADScoutAdminGroup','Find-ADScoutSPNAccount','Find-ADScoutASREPAccount','Find-ADScoutUnconstrainedDelegation','Find-ADScoutConstrainedDelegation','Find-ADScoutAdminSDHolderOrphan','Find-ADScoutWeakUacFlag','Find-ADScoutDCSyncRight','Get-ADScoutGPO','Get-ADScoutOU','Get-ADScoutLinkedGPO','Get-ADScoutObjectAcl','Find-ADScoutInterestingAce','Get-ADScoutGroupMember','Get-ADScoutGroupReport','Find-ADScoutPrivilegedUser','Find-ADScoutDelegationHint','Find-ADScoutOldComputer','Get-ADScoutFinding','Show-ADScoutFindingsGui','Invoke-ADScout'
-)
+
+if (-not $LoadOnly) {
+    Invoke-ADScout -Server $Server -Credential $Credential -SearchBase $SearchBase -OutputPath $OutputPath -OutputFormat $OutputFormat -SkipAclSweep:$SkipAclSweep -Gui:$Gui
+}
