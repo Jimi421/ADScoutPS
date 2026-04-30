@@ -6,57 +6,52 @@
 Import-Module .\ADScoutPS\ADScoutPS.psd1 -Force
 ```
 
-## Recommended operator workflow
+## Recommended Workflow
 
-Start with the high-signal GUI view:
+Fast, low-friction collection:
+
+```powershell
+Invoke-ADScout -SkipAclSweep
+```
+
+Findings dashboard:
 
 ```powershell
 Invoke-ADScout -Gui -SkipAclSweep
 ```
 
-Then manually dig deeper with CLI commands:
+Full review including ACL/DCSync checks:
 
 ```powershell
+Invoke-ADScout -Gui
+```
+
+## Findings First
+
+```powershell
+Get-ADScoutFinding | Sort-Object Severity,Category,Title
+Get-ADScoutFinding | Export-Csv .\findings.csv -NoTypeInformation
+Get-ADScoutFinding | Show-ADScoutFindingsGui
+```
+
+## Focus Areas
+
+```powershell
+Find-ADScoutASREPAccount
 Find-ADScoutSPNAccount
-Find-ADScoutPrivilegedUser -Recursive
-Find-ADScoutDelegationHint
-Get-ADScoutOU
-Get-ADScoutObjectAcl -Name "Workstations" -ObjectClass organizationalUnit
+Find-ADScoutUnconstrainedDelegation
+Find-ADScoutConstrainedDelegation
+Find-ADScoutDCSyncRight
+Find-ADScoutWeakUacFlag
+Find-ADScoutAdminSDHolderOrphan
+Get-ADScoutPasswordPolicy
+Get-ADScoutDomainTrust
+Get-ADScoutLapsStatus
 ```
 
-## Full collection
-
-```powershell
-Invoke-ADScout
-```
-
-## GUI-only style review
-
-```powershell
-Show-ADScoutFindingsGui -SkipAclSweep
-```
-
-## Findings as objects
-
-```powershell
-Get-ADScoutFinding -SkipAclSweep | Sort-Object Severity,Type
-```
-
-## Export only findings
-
-```powershell
-Get-ADScoutFinding -SkipAclSweep | Export-Csv .\findings.csv -NoTypeInformation
-```
-
-## Target a specific DC
-
-```powershell
-Invoke-ADScout -Server dc01.corp.local -Gui -SkipAclSweep
-```
-
-## Use alternate credentials
+## Target a Specific DC
 
 ```powershell
 $cred = Get-Credential
-Invoke-ADScout -Server dc01.corp.local -Credential $cred -Gui
+Invoke-ADScout -Server dc01.corp.local -Credential $cred -SearchBase "DC=corp,DC=local"
 ```

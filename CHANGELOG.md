@@ -1,21 +1,26 @@
 # Changelog
 
-## v0.6.0 - Findings GUI
+## v0.7.0
 
-- Added `Invoke-ADScout -Gui`
-- Added `Get-ADScoutFinding`
-- Added `Show-ADScoutFindingsGui`
-- Added normalized finding objects with Severity, Type, Title, Reason, Evidence, and DistinguishedName
-- Added findings export to Invoke-ADScout output
-- Preserved all manual CLI enumeration functions
+- Added normalized attack-path findings engine.
+- Added AS-REP roast candidate detection via `DONT_REQUIRE_PREAUTH`.
+- Added unconstrained delegation detection with non-DC filtering by default.
+- Added constrained delegation review for KCD and RBCD indicators.
+- Added DCSync-right detection for domain-root replication GUIDs.
+- Added domain trust enumeration.
+- Added domain controller enumeration.
+- Added default and fine-grained password policy review.
+- Added `adminCount=1` privileged-object review.
+- Added weak UAC flag sweep and `ConvertTo-ADScoutUacFlag` helper.
+- Added LAPS visibility review per computer.
+- Preserved manual CLI commands and `Invoke-ADScout -Gui` findings dashboard.
+- Rebuilt module core for consistent `-Server`, `-Credential`, and `-SearchBase` support.
 
-## v0.5.0 - Auto Domain
+## v0.6.0
 
-- Added current domain/PDC/base DN auto-discovery
-- Added friendly identity/name ACL targeting
-- Preserved raw DistinguishedName targeting
+- Added findings-first GUI mode.
+- Added normalized basic findings output.
 
-## v0.4.0 - Help + Completion
+## v0.5.0
 
-- Added comment-based help
-- Added tab completion support
+- Added auto domain/PDC/base DN discovery.
