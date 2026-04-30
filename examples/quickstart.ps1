@@ -1,9 +1,5 @@
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Import-Module .\ADScoutPS\ADScoutPS.psd1 -Force
-
-Get-ADScoutDomainInfo
-Invoke-ADScout -SkipAclSweep
-Get-ADScoutFinding -SkipAclSweep
-
-# Clean nested group review
-Get-ADScoutGroupReport -PrivilegedOnly -Recursive |
-    Format-Table Group,ParentGroup,Member,MemberType,Depth -AutoSize
+Test-ADScoutEnvironment
+Invoke-ADScout -Preset Quick
+Get-ADScoutFinding -SkipAclSweep | Format-Table Severity,Category,Title,Target -AutoSize

@@ -1,26 +1,24 @@
 <#
-ADScoutPS Standalone Runner
-Read-only Active Directory enumeration for authorized labs and approved assessments only.
-
-Examples:
-  powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -SkipAclSweep
-  powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -Gui -SkipAclSweep
-  . .\ADScout.ps1 -LoadOnly
-  Get-ADScoutGroupReport -PrivilegedOnly -Recursive
+ADScoutPS Standalone v1.2.0
+Single-file operator drop for authorized labs and approved internal assessments.
 #>
-
 param(
     [switch]$LoadOnly,
-    [switch]$Gui,
-    [switch]$SkipAclSweep,
+    [ValidateSet('Quick','Standard','Deep')][string]$Preset = 'Standard',
     [string]$Server,
     [PSCredential]$Credential,
     [string]$SearchBase,
     [string]$OutputPath = 'ADScout-Results',
-    [ValidateSet('CSV','JSON','Both')]
-    [string]$OutputFormat = 'Both'
+    [ValidateSet('CSV','JSON','Both')][string]$OutputFormat = 'Both',
+    [switch]$SkipAclSweep,
+    [switch]$IncludeAclSweep,
+    [switch]$Gui,
+    [ValidateSet('Findings','PrivilegedGroups','Delegation','Users','Computers','All')][string]$View = 'Findings',
+    [switch]$Report,
+    [switch]$NoExport
 )
 
+# Embedded ADScoutPS module code starts here.
 <#
 ADScoutPS v1.1.0 - PowerShell Active Directory Enumeration Toolkit
 Read-only enumeration for authorized lab environments and approved internal assessments only.
@@ -763,19 +761,307 @@ Invoke-ADScout -Gui -OutputFormat Both
     [PSCustomObject]@{ OutputPath=$runPath; Findings=$data.Findings.Count; Critical=@($data.Findings | Where-Object Severity -eq 'Critical').Count; High=@($data.Findings | Where-Object Severity -eq 'High').Count; Users=$data.Users.Count; Computers=$data.Computers.Count; DomainControllers=$data.DomainControllers.Count }
 }
 
+# Load tab-completion support
+$completionPath = Join-Path $PSScriptRoot 'ADScoutPS.Completion.ps1'
+if (Test-Path $completionPath) { . $completionPath }
 
+Export-ModuleMember -Function @(
+    'ConvertTo-ADScoutUacFlag','Get-ADScoutDomainInfo','Get-ADScoutUser','Get-ADScoutGroup','Get-ADScoutComputer','Get-ADScoutDomainController','Get-ADScoutDomainTrust','Get-ADScoutPasswordPolicy','Get-ADScoutLapsStatus','Find-ADScoutAdminGroup','Find-ADScoutSPNAccount','Find-ADScoutASREPAccount','Find-ADScoutUnconstrainedDelegation','Find-ADScoutConstrainedDelegation','Find-ADScoutAdminSDHolderOrphan','Find-ADScoutWeakUacFlag','Find-ADScoutDCSyncRight','Get-ADScoutGPO','Get-ADScoutOU','Get-ADScoutLinkedGPO','Get-ADScoutObjectAcl','Find-ADScoutInterestingAce','Get-ADScoutGroupMember','Get-ADScoutGroupReport','Find-ADScoutPrivilegedUser','Find-ADScoutDelegationHint','Find-ADScoutOldComputer','Get-ADScoutFinding','Show-ADScoutFindingsGui','Invoke-ADScout'
+)
 
-$calledViaImportModule = $false
-try {
-    $calledViaImportModule = ($MyInvocation.Line -match '^\s*Import-Module\b') -or ($MyInvocation.InvocationName -eq 'Import-Module')
-} catch {
-    $calledViaImportModule = $false
+# -----------------------------------------------------------------------------
+# v1.2.0 WorldClassFoundation additions/overrides
+# -----------------------------------------------------------------------------
+$script:ADScoutVersion = '1.2.0'
+$script:ADScoutLastRun = $null
+$script:ADScoutLastFindings = @()
+
+function Get-ADScoutVersion {
+<#
+.SYNOPSIS
+Returns ADScoutPS version and runtime information.
+#>
+    [CmdletBinding()]
+    param()
+    [PSCustomObject]@{
+        Name = 'ADScoutPS'
+        Version = $script:ADScoutVersion
+        PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+        PSEdition = $PSVersionTable.PSEdition
+        ComputerName = $env:COMPUTERNAME
+        UserName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        Timestamp = Get-Date
+    }
 }
 
-if ($calledViaImportModule) {
-    $LoadOnly = $true
+function Test-ADScoutEnvironment {
+<#
+.SYNOPSIS
+Runs a quick environment validation before collection.
+.DESCRIPTION
+Checks current identity, PowerShell version, RootDSE/domain discovery, LDAP bind, and Out-GridView availability.
+.EXAMPLE
+Test-ADScoutEnvironment
+#>
+    [CmdletBinding()]
+    param([string]$Server,[PSCredential]$Credential,[string]$SearchBase)
+
+    $ctx = $null
+    $domainStatus = 'Failed'
+    $ldapStatus = 'Failed'
+    $errorText = $null
+    try {
+        $ctx = Get-ADScoutDomainContext -Server $Server -Credential $Credential -SearchBase $SearchBase
+        $domainStatus = 'Success'
+        $entry = New-ADScoutDirectoryEntry -LdapPath $ctx.LdapBasePath -Credential $Credential
+        [void]$entry.NativeObject
+        $ldapStatus = 'Success'
+    }
+    catch { $errorText = $_.Exception.Message }
+
+    [PSCustomObject]@{
+        Tool = 'ADScoutPS'
+        Version = $script:ADScoutVersion
+        CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        ComputerName = $env:COMPUTERNAME
+        PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+        PSEdition = $PSVersionTable.PSEdition
+        DomainDiscovery = $domainStatus
+        LdapBind = $ldapStatus
+        Server = if ($ctx) { $ctx.Server } else { $Server }
+        SearchBase = if ($ctx) { $ctx.SearchBase } else { $SearchBase }
+        DomainController = if ($ctx) { $ctx.DnsHostName } else { $null }
+        OutGridViewAvailable = [bool](Get-Command Out-GridView -ErrorAction SilentlyContinue)
+        Error = $errorText
+        Timestamp = Get-Date
+    }
 }
 
-if (-not $LoadOnly) {
-    Invoke-ADScout -Server $Server -Credential $Credential -SearchBase $SearchBase -OutputPath $OutputPath -OutputFormat $OutputFormat -SkipAclSweep:$SkipAclSweep -Gui:$Gui
+function New-ADScoutFinding {
+<#
+.SYNOPSIS
+Creates a normalized ADScout finding object.
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0)][ValidateSet('Critical','High','Medium','Low','Info')][string]$Severity,
+        [Parameter(Position=1)][string]$Category,
+        [Parameter(Position=2)][string]$Title,
+        [Parameter(Position=3)][string]$Target,
+        [Parameter(Position=4)][string]$Evidence,
+        [Parameter(Position=5)][string]$WhyItMatters,
+        [Parameter(Position=6)][string]$RecommendedReview,
+        [Parameter(Position=7)][string]$SourceCommand,
+        [Parameter(Position=8)][string]$DistinguishedName,
+        [string]$Identity
+    )
+    if (-not $Identity) { $Identity = $Target }
+    [PSCustomObject][ordered]@{
+        Severity = $Severity
+        Category = $Category
+        Title = $Title
+        Target = $Target
+        Identity = $Identity
+        Evidence = $Evidence
+        WhyItMatters = $WhyItMatters
+        RecommendedReview = $RecommendedReview
+        SourceCommand = $SourceCommand
+        DistinguishedName = $DistinguishedName
+        Timestamp = Get-Date
+    }
 }
+
+function Get-ADScoutAsRepRoastCandidate {
+<#
+.SYNOPSIS
+Compatibility-friendly name for AS-REP roast candidate discovery.
+#>
+    [CmdletBinding()]
+    param([string]$Server,[PSCredential]$Credential,[string]$SearchBase)
+    Find-ADScoutASREPAccount -Server $Server -Credential $Credential -SearchBase $SearchBase
+}
+
+function Get-ADScoutPrivilegePath {
+<#
+.SYNOPSIS
+Shows user-to-privileged-group paths based on recursive group membership.
+.EXAMPLE
+Get-ADScoutPrivilegePath
+#>
+    [CmdletBinding()]
+    param([int]$MaxDepth = 20,[string]$Server,[PSCredential]$Credential,[string]$SearchBase)
+    Get-ADScoutGroupReport -PrivilegedOnly -Recursive -Server $Server -Credential $Credential -SearchBase $SearchBase |
+        Where-Object { $_.MemberType -eq 'user' } |
+        Select-Object Group,ParentGroup,Member,MemberType,Depth,Path,DistinguishedName
+}
+
+function New-ADScoutHtmlReport {
+<#
+.SYNOPSIS
+Creates a lightweight offline HTML report for an ADScout run.
+#>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$RunData,[Parameter(Mandatory)][string]$OutputPath)
+
+    function ConvertTo-ADScoutHtmlTable {
+        param($Rows,[string]$Title)
+        $items = @($Rows)
+        if ($items.Count -eq 0) { return "<h2>$Title</h2><p>No rows.</p>" }
+        return ($items | ConvertTo-Html -Fragment -PreContent "<h2>$Title</h2>") -join [Environment]::NewLine
+    }
+
+    $findings = @($RunData.Findings)
+    $critical = @($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
+    $high = @($findings | Where-Object { $_.Severity -eq 'High' }).Count
+    $generated = [System.Net.WebUtility]::HtmlEncode((Get-Date).ToString())
+    $html = @"
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>ADScoutPS Report</title>
+<style>
+body { font-family: Segoe UI, Arial, sans-serif; margin: 32px; color: #1f2933; }
+h1 { margin-bottom: 0; }
+.meta { color: #5b6773; margin-top: 4px; }
+.summary { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0; }
+.card { border: 1px solid #d9e2ec; border-radius: 8px; padding: 12px 16px; min-width: 140px; background: #f8fafc; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 28px; font-size: 13px; }
+th, td { border: 1px solid #d9e2ec; padding: 6px 8px; text-align: left; vertical-align: top; }
+th { background: #eef2f7; }
+</style>
+</head>
+<body>
+<h1>ADScoutPS Report</h1>
+<div class="meta">Generated: $generated</div>
+<div class="summary">
+  <div class="card"><strong>Findings</strong><br />$($findings.Count)</div>
+  <div class="card"><strong>Critical</strong><br />$critical</div>
+  <div class="card"><strong>High</strong><br />$high</div>
+  <div class="card"><strong>Users</strong><br />$(@($RunData.Users).Count)</div>
+  <div class="card"><strong>Computers</strong><br />$(@($RunData.Computers).Count)</div>
+</div>
+$(ConvertTo-ADScoutHtmlTable -Rows ($findings | Sort-Object Severity,Category,Title) -Title 'Findings')
+$(ConvertTo-ADScoutHtmlTable -Rows $RunData.PrivilegedGroupMembers -Title 'Privileged Group Members')
+$(ConvertTo-ADScoutHtmlTable -Rows $RunData.Delegation -Title 'Delegation Review')
+$(ConvertTo-ADScoutHtmlTable -Rows $RunData.PasswordPolicies -Title 'Password Policy')
+$(ConvertTo-ADScoutHtmlTable -Rows $RunData.DomainTrusts -Title 'Domain Trusts')
+$(ConvertTo-ADScoutHtmlTable -Rows $RunData.DomainControllers -Title 'Domain Controllers')
+</body>
+</html>
+"@
+    $html | Out-File -FilePath $OutputPath -Encoding UTF8
+    return $OutputPath
+}
+
+function Get-ADScoutFinding {
+<#
+.SYNOPSIS
+Returns normalized findings sorted by operational priority.
+.EXAMPLE
+Get-ADScoutFinding -SkipAclSweep
+.EXAMPLE
+Get-ADScoutFinding -IncludeAclSweep
+#>
+    [CmdletBinding()]
+    param([string]$Server,[PSCredential]$Credential,[string]$SearchBase,[switch]$SkipAclSweep,[switch]$IncludeAclSweep)
+    $runAcl = $IncludeAclSweep.IsPresent -and (-not $SkipAclSweep.IsPresent)
+    $f = New-Object System.Collections.Generic.List[object]
+
+    foreach ($x in Find-ADScoutASREPAccount -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $f.Add((New-ADScoutFinding 'Critical' 'Authentication' 'AS-REP roast candidate' $target $x.UacFlags 'Kerberos preauthentication is disabled for this account.' 'Review whether preauthentication should be required and whether the account is still needed.' 'Find-ADScoutASREPAccount' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutSPNAccount -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $sev=if((Get-ADScoutSafeProperty -InputObject $x -Name 'AdminCount') -eq '1'){'High'}else{'Medium'}; $f.Add((New-ADScoutFinding $sev 'Kerberos' 'SPN-bearing user account' $target $x.ServicePrincipalName 'User accounts with SPNs are common Kerberoast review targets in authorized assessments.' 'Validate service account ownership, password policy, and privilege level.' 'Find-ADScoutSPNAccount' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutUnconstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $f.Add((New-ADScoutFinding 'Critical' 'Delegation' 'Unconstrained delegation on non-DC object' $target $x.UacFlags 'Unconstrained delegation can expose delegated authentication material if the account/host is compromised.' 'Confirm business need and review delegation configuration.' 'Find-ADScoutUnconstrainedDelegation' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutConstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $sev=if($x.Type -eq 'RBCD'){'High'}else{'Medium'}; $f.Add((New-ADScoutFinding $sev 'Delegation' "$($x.Type) delegation configured" $target $x.DelegatesTo 'Delegation configuration should be reviewed as part of AD attack-path analysis.' 'Validate target services/principals and intended administration model.' 'Find-ADScoutConstrainedDelegation' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutDCSyncRight -Server $Server -Credential $Credential -SearchBase $SearchBase) { $sev=if($x.IdentityReference -match 'Domain Admins|Enterprise Admins|Domain Controllers|SYSTEM'){'Info'}else{'Critical'}; $f.Add((New-ADScoutFinding $sev 'Replication Rights' 'DCSync-related replication right' $x.IdentityReference $x.RightName 'Replication rights on the domain root are highly sensitive.' 'Review whether this principal should have directory replication permissions.' 'Find-ADScoutDCSyncRight' $x.DistinguishedName)) }
+    foreach ($x in Get-ADScoutPasswordPolicy -Server $Server -Credential $Credential -SearchBase $SearchBase | Where-Object { (Get-ADScoutSafeProperty -InputObject $_ -Name 'LockoutDisabled') -eq $true -or ((Get-ADScoutSafeProperty -InputObject $_ -Name 'MinPwdLength') -ne $null -and [int](Get-ADScoutSafeProperty -InputObject $_ -Name 'MinPwdLength') -lt 12) }) { $f.Add((New-ADScoutFinding 'High' 'Password Policy' 'Password policy review item' $x.Name "MinPwdLength=$($x.MinPwdLength); LockoutThreshold=$($x.LockoutThreshold)" 'Weak password or lockout policy settings can increase account abuse risk.' 'Review password and lockout policy against organizational standards.' 'Get-ADScoutPasswordPolicy' $x.DistinguishedName)) }
+    foreach ($x in Get-ADScoutDomainTrust -Server $Server -Credential $Credential -SearchBase $SearchBase) { $f.Add((New-ADScoutFinding 'Info' 'Trusts' 'Domain trust present' $x.Name "Direction=$($x.TrustDirection); Type=$($x.TrustType); Attr=$($x.TrustAttributes)" 'Trusts expand the AD security boundary and should be mapped.' 'Review trust direction, transitivity, and SID filtering configuration.' 'Get-ADScoutDomainTrust' $x.DistinguishedName)) }
+    foreach ($x in Get-ADScoutDomainController -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target=Get-ADScoutObjectDisplayName -InputObject $x; $f.Add((New-ADScoutFinding 'Info' 'Domain Controllers' 'Domain controller discovered' $target $x.OperatingSystem 'Domain controllers are Tier 0 assets and should be tracked separately.' 'Use for scoping and defensive review.' 'Get-ADScoutDomainController' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutAdminSDHolderOrphan -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target=if($x.SamAccountName){$x.SamAccountName}else{$x.Name}; $f.Add((New-ADScoutFinding 'Medium' 'Privilege Hygiene' 'adminCount=1 object' $target $x.ObjectClass 'adminCount=1 may indicate current or historical privileged protection.' 'Review whether object is still privileged and whether ACL inheritance is appropriate.' 'Find-ADScoutAdminSDHolderOrphan' $x.DistinguishedName)) }
+    foreach ($x in Find-ADScoutWeakUacFlag -Server $Server -Credential $Credential -SearchBase $SearchBase) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $sev=if($x.UacFlags -match 'ENCRYPTED_TEXT_PWD_ALLOWED|PASSWD_NOTREQD|USE_DES_KEY_ONLY'){'High'}else{'Medium'}; $f.Add((New-ADScoutFinding $sev 'Account Flags' 'Weak/review-worthy UAC flag' $target $x.UacFlags 'UAC flags can reveal relaxed authentication or password controls.' 'Review whether these flags are required.' 'Find-ADScoutWeakUacFlag' $x.DistinguishedName)) }
+    foreach ($x in Get-ADScoutLapsStatus -Server $Server -Credential $Credential -SearchBase $SearchBase | Where-Object { -not $_.HasLegacyLaps -and -not $_.HasWindowsLaps }) { $target = Get-ADScoutObjectDisplayName -InputObject $x; $f.Add((New-ADScoutFinding 'Medium' 'Endpoint Hygiene' 'No visible LAPS metadata' $target $x.DnsHostName 'Systems without visible LAPS metadata may need local admin password management review.' 'Confirm whether LAPS or another local admin password control is deployed.' 'Get-ADScoutLapsStatus' $x.DistinguishedName)) }
+    if ($runAcl) { foreach ($x in Find-ADScoutInterestingAce -Server $Server -Credential $Credential -SearchBase $SearchBase) { $f.Add((New-ADScoutFinding 'High' 'ACL/ACE' 'Interesting ACE' $x.IdentityReference $x.ActiveDirectoryRights 'Powerful ACEs can indicate delegated control paths.' 'Review whether the delegated permission is expected and least-privilege.' 'Find-ADScoutInterestingAce' $x.DistinguishedName)) } }
+
+    $rank=@{Critical=0;High=1;Medium=2;Low=3;Info=4}; $items=@($f | Sort-Object @{Expression={$rank[$_.Severity]}},Category,Title,Target); $script:ADScoutLastFindings=$items; return $items
+}
+
+function Show-ADScoutFindingsGui {
+<#
+.SYNOPSIS
+Shows selected ADScout views in Out-GridView when available.
+#>
+    [CmdletBinding()]
+    param([ValidateSet('Findings','PrivilegedGroups','Delegation','Users','Computers','All')][string]$View='Findings',[string]$Server,[PSCredential]$Credential,[string]$SearchBase,[switch]$IncludeAclSweep,[switch]$SkipAclSweep,[object[]]$Findings)
+    $grid = [bool](Get-Command Out-GridView -ErrorAction SilentlyContinue)
+    if ($View -eq 'PrivilegedGroups') { $data=@(Get-ADScoutGroupReport -PrivilegedOnly -Recursive -Server $Server -Credential $Credential -SearchBase $SearchBase); $title='ADScoutPS - Privileged Group Members' }
+    elseif ($View -eq 'Delegation') { $data=@(Find-ADScoutConstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) + @(Find-ADScoutUnconstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase); $title='ADScoutPS - Delegation Review' }
+    elseif ($View -eq 'Users') { $data=@(Get-ADScoutUser -Server $Server -Credential $Credential -SearchBase $SearchBase); $title='ADScoutPS - Users' }
+    elseif ($View -eq 'Computers') { $data=@(Get-ADScoutComputer -Server $Server -Credential $Credential -SearchBase $SearchBase); $title='ADScoutPS - Computers' }
+    else { $data=if($Findings){@($Findings)}else{@(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -SkipAclSweep:$SkipAclSweep -IncludeAclSweep:$IncludeAclSweep)}; $title='ADScoutPS - Findings Dashboard' }
+    if ($grid) { $data | Out-GridView -Title $title } else { Write-Warning 'Out-GridView unavailable; using console output.'; $data | Format-Table -AutoSize }
+    if ($View -eq 'All' -and $grid) { Get-ADScoutGroupReport -PrivilegedOnly -Recursive -Server $Server -Credential $Credential -SearchBase $SearchBase | Out-GridView -Title 'ADScoutPS - Privileged Groups'; Get-ADScoutUser -Server $Server -Credential $Credential -SearchBase $SearchBase | Out-GridView -Title 'ADScoutPS - Users' }
+}
+
+function Invoke-ADScout {
+<#
+.SYNOPSIS
+Runs ADScoutPS collection using operator presets.
+.DESCRIPTION
+Quick and Standard avoid broad ACL sweeps by default. Deep includes ACL review unless -SkipAclSweep is used.
+.EXAMPLE
+Invoke-ADScout -Preset Quick
+.EXAMPLE
+Invoke-ADScout -Gui -View Findings -SkipAclSweep
+.EXAMPLE
+Invoke-ADScout -Preset Deep -Report
+#>
+    [CmdletBinding()]
+    param([ValidateSet('Quick','Standard','Deep')][string]$Preset='Standard',[string]$Server,[PSCredential]$Credential,[string]$SearchBase,[string]$OutputPath='ADScout-Results',[ValidateSet('CSV','JSON','Both')][string]$OutputFormat='Both',[switch]$SkipAclSweep,[switch]$IncludeAclSweep,[switch]$Gui,[ValidateSet('Findings','PrivilegedGroups','Delegation','Users','Computers','All')][string]$View='Findings',[switch]$Report,[switch]$NoExport)
+    $runAcl = $IncludeAclSweep.IsPresent -or ($Preset -eq 'Deep')
+    if ($SkipAclSweep) { $runAcl = $false }
+    Write-Host "[*] ADScoutPS v$script:ADScoutVersion collection starting..." -ForegroundColor Cyan
+    Write-Host "[*] Preset: $Preset | ACL sweep: $runAcl" -ForegroundColor Cyan
+    $timestamp=Get-Date -Format 'yyyyMMdd-HHmmss'; $runPath=Join-Path $OutputPath "Run-$timestamp"
+    if(-not $NoExport){ New-Item -ItemType Directory -Path $runPath -Force | Out-Null }
+    $data=[ordered]@{}
+    $data.Environment=@(Test-ADScoutEnvironment -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.DomainInfo=@(Get-ADScoutDomainInfo -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.DomainControllers=@(Get-ADScoutDomainController -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.Users=@(Get-ADScoutUser -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.Groups=@(Get-ADScoutGroup -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.Computers=@(Get-ADScoutComputer -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    if($Preset -ne 'Quick') { $data.GPOs=@(Get-ADScoutGPO -Server $Server -Credential $Credential); $data.OUs=@(Get-ADScoutOU -Server $Server -Credential $Credential -SearchBase $SearchBase); $data.LinkedGPOs=@(Get-ADScoutLinkedGPO -Server $Server -Credential $Credential -SearchBase $SearchBase); $data.DomainTrusts=@(Get-ADScoutDomainTrust -Server $Server -Credential $Credential -SearchBase $SearchBase) } else { $data.GPOs=@(); $data.OUs=@(); $data.LinkedGPOs=@(); $data.DomainTrusts=@() }
+    $data.PasswordPolicies=@(Get-ADScoutPasswordPolicy -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.SPNAccounts=@(Find-ADScoutSPNAccount -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.ASREPAccounts=@(Find-ADScoutASREPAccount -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.Delegation=@(@(Find-ADScoutUnconstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) + @(Find-ADScoutConstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase))
+    $data.AdminSDHolderObjects=@(Find-ADScoutAdminSDHolderOrphan -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.PrivilegedGroupMembers=@(Get-ADScoutGroupReport -PrivilegedOnly -Recursive -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.PrivilegePaths=@(Get-ADScoutPrivilegePath -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.WeakUacFlags=@(Find-ADScoutWeakUacFlag -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.LapsStatus=@(Get-ADScoutLapsStatus -Server $Server -Credential $Credential -SearchBase $SearchBase)
+    $data.Findings=@(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -IncludeAclSweep:$runAcl -SkipAclSweep:(!$runAcl))
+    $script:ADScoutLastRun=[PSCustomObject]$data; $script:ADScoutLastFindings=$data.Findings
+    if(-not $NoExport){
+        foreach($k in $data.Keys){ $base=Join-Path $runPath $k; if($OutputFormat -in @('CSV','Both')){ $data[$k] | Export-Csv "$base.csv" -NoTypeInformation }; if($OutputFormat -in @('JSON','Both')){ $data[$k] | ConvertTo-Json -Depth 8 | Out-File "$base.json" -Encoding UTF8 } }
+        $summary=@('# ADScoutPS Summary','',"Version: $script:ADScoutVersion","Preset: $Preset","ACL sweep: $runAcl",'', '| Collection | Count |','|---|---:|') + ($data.Keys | ForEach-Object { "| $_ | $($data[$_].Count) |" })
+        $summary | Out-File (Join-Path $runPath 'summary.md') -Encoding UTF8
+        if($Report){ New-ADScoutHtmlReport -RunData ([PSCustomObject]$data) -OutputPath (Join-Path $runPath 'report.html') | Out-Null }
+        Write-Host "[+] Results written to $runPath" -ForegroundColor Green
+    }
+    Write-Host "[!] Critical findings: $(@($data.Findings | Where-Object Severity -eq 'Critical').Count)" -ForegroundColor Red
+    Write-Host "[!] High findings:     $(@($data.Findings | Where-Object Severity -eq 'High').Count)" -ForegroundColor Yellow
+    if($Gui){ Show-ADScoutFindingsGui -View $View -Server $Server -Credential $Credential -SearchBase $SearchBase -Findings $data.Findings -IncludeAclSweep:$runAcl -SkipAclSweep:(!$runAcl) }
+    [PSCustomObject]@{ OutputPath=if($NoExport){$null}else{$runPath}; Preset=$Preset; AclSweep=$runAcl; Findings=$data.Findings.Count; Critical=@($data.Findings | Where-Object Severity -eq 'Critical').Count; High=@($data.Findings | Where-Object Severity -eq 'High').Count; Users=$data.Users.Count; Computers=$data.Computers.Count; DomainControllers=$data.DomainControllers.Count }
+}
+
+Export-ModuleMember -Function @(
+    'ConvertTo-ADScoutUacFlag','Get-ADScoutVersion','Test-ADScoutEnvironment','Get-ADScoutDomainInfo','Get-ADScoutUser','Get-ADScoutGroup','Get-ADScoutComputer','Get-ADScoutDomainController','Get-ADScoutDomainTrust','Get-ADScoutPasswordPolicy','Get-ADScoutLapsStatus','Find-ADScoutAdminGroup','Find-ADScoutSPNAccount','Get-ADScoutAsRepRoastCandidate','Find-ADScoutASREPAccount','Find-ADScoutUnconstrainedDelegation','Find-ADScoutConstrainedDelegation','Find-ADScoutAdminSDHolderOrphan','Find-ADScoutWeakUacFlag','Find-ADScoutDCSyncRight','Get-ADScoutGPO','Get-ADScoutOU','Get-ADScoutLinkedGPO','Get-ADScoutObjectAcl','Find-ADScoutInterestingAce','Get-ADScoutGroupMember','Get-ADScoutGroupReport','Get-ADScoutPrivilegePath','Find-ADScoutPrivilegedUser','Find-ADScoutDelegationHint','Find-ADScoutOldComputer','Get-ADScoutFinding','Show-ADScoutFindingsGui','New-ADScoutHtmlReport','Invoke-ADScout'
+)
+
+# Embedded ADScoutPS module code ends here.
+
+if ($LoadOnly) {
+    Write-Host "[+] ADScoutPS v$script:ADScoutVersion functions loaded. Run Test-ADScoutEnvironment or Get-ADScoutVersion." -ForegroundColor Green
+    return
+}
+Invoke-ADScout -Preset $Preset -Server $Server -Credential $Credential -SearchBase $SearchBase -OutputPath $OutputPath -OutputFormat $OutputFormat -SkipAclSweep:$SkipAclSweep -IncludeAclSweep:$IncludeAclSweep -Gui:$Gui -View $View -Report:$Report -NoExport:$NoExport

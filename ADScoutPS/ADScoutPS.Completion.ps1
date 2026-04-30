@@ -274,3 +274,13 @@ Register-ArgumentCompleter -CommandName Get-ADScoutGroupReport -ParameterName Gr
         return
     }
 }
+
+
+Register-ArgumentCompleter -CommandName Invoke-ADScout -ParameterName Preset -ScriptBlock {
+    param($commandName,$parameterName,$wordToComplete)
+    'Quick','Standard','Deep' | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object { [System.Management.Automation.CompletionResult]::new($_,$_,'ParameterValue',"Preset: $_") }
+}
+Register-ArgumentCompleter -CommandName Invoke-ADScout,Show-ADScoutFindingsGui -ParameterName View -ScriptBlock {
+    param($commandName,$parameterName,$wordToComplete)
+    'Findings','PrivilegedGroups','Delegation','Users','Computers','All' | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object { [System.Management.Automation.CompletionResult]::new($_,$_,'ParameterValue',"View: $_") }
+}

@@ -1,6 +1,6 @@
 @{
     RootModule        = 'ADScoutPS.psm1'
-    ModuleVersion     = '1.0.0'
+    ModuleVersion = '1.2.0'
     GUID              = 'b88ad47a-cc7e-4d7b-9735-8f50e1af6a44'
     Author            = 'Braxton Bailey'
     CompanyName       = 'Community'
@@ -38,6 +38,11 @@
         'Find-ADScoutOldComputer',
         'Get-ADScoutFinding',
         'Show-ADScoutFindingsGui',
+        'Get-ADScoutVersion',
+        'Test-ADScoutEnvironment',
+        'Get-ADScoutAsRepRoastCandidate',
+        'Get-ADScoutPrivilegePath',
+        'New-ADScoutHtmlReport',
         'Invoke-ADScout'
     )
     CmdletsToExport   = @()

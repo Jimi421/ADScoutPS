@@ -1,11 +1,5 @@
-# PowerShell / output
 ADScout-Results/
 *.zip
 *.log
-*.tmp
-
-# OS / editor
+*.bak
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/

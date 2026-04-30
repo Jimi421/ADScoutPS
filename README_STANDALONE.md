@@ -1,50 +1,10 @@
-# ADScoutPS Standalone Runner
+# ADScoutPS Standalone
 
-`ADScout.ps1` is a one-file launcher that embeds the ADScoutPS module logic so it can be dropped onto an authorized Windows lab box and run quickly.
-
-## Run Collection
+`ADScout.ps1` is the single-file operator drop. You do not need the module folder on the Windows lab box for standalone use.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -SkipAclSweep
-```
-
-## Run Findings GUI
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -Gui -SkipAclSweep
-```
-
-## Load Functions for Manual Use
-
-```powershell
+powershell -ExecutionPolicy Bypass -File .\ADScout.ps1 -Preset Quick
 . .\ADScout.ps1 -LoadOnly
+Test-ADScoutEnvironment
+Get-ADScoutFinding -SkipAclSweep
 ```
-
-Then run manual commands:
-
-```powershell
-Get-ADScoutDomainInfo
-Get-ADScoutFinding
-Get-ADScoutGroupReport -PrivilegedOnly -Recursive
-Find-ADScoutSPNAccount
-Find-ADScoutASREPAccount
-Find-ADScoutWeakUacFlag
-```
-
-## Notes
-
-- Use `-SkipAclSweep` first for a faster, lower-noise run.
-- Use CLI output as the source of truth if GUI mode is unavailable.
-- Keep the generated `ADScout-Results` folder for notes and screenshots.
-
-
-## v1.1 note
-
-If you want manual commands from the standalone file, use dot-sourcing:
-
-```powershell
-. .\ADScout.ps1 -LoadOnly
-Get-ADScoutDomainInfo
-```
-
-Avoid `Import-Module .\ADScout.ps1`; use the module manifest for module mode or dot-source the standalone file.
