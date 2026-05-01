@@ -1,19 +1,25 @@
 <#
 .SYNOPSIS
-ADScoutPS v1.4.0 - PowerShell Active Directory Enumeration Toolkit
+ADScoutPS v1.5.0 - PowerShell Active Directory Enumeration Toolkit
 
 .DESCRIPTION
 Read-only AD enumeration for authorized lab environments and approved internal assessments.
-Single-file design -- works as Import-Module target, dot-source, or direct script execution.
+Single-file design -- dot-source for interactive use, direct execution for operator mode.
 No RSAT. No ActiveDirectory module. No dependencies beyond the Windows .NET runtime.
 
 USAGE:
-    Import-Module .\ADScoutPS.ps1                          # load all functions
-    . .\ADScoutPS.ps1                                      # dot-source
-    .\ADScoutPS.ps1 -Preset Quick                          # run directly
-    .\ADScoutPS.ps1 -Preset Deep -Report                   # full run with HTML report
-    .\ADScoutPS.ps1 -Gui -View Findings -SkipAclSweep      # GUI dashboard
-    powershell -ExecutionPolicy Bypass -File .\ADScoutPS.ps1 -Preset Standard
+    # Load functions interactively (preferred)
+    . .\ADScoutPS.ps1 -LoadOnly
+    Get-ADScoutVersion
+    Test-ADScoutEnvironment
+    $data = Invoke-ADScoutCollection -Preset Standard -LabMode
+    $data | Get-ADScoutFinding | Get-ADScoutSummary
+    Get-ADScoutPathHint -RunData $data
+
+    # Direct execution
+    .\ADScoutPS.ps1 -Preset Standard -LabMode
+    .\ADScoutPS.ps1 -Preset Deep -Report
+    powershell -ExecutionPolicy Bypass -File .\ADScoutPS.ps1 -Preset Quick -LabMode
 
 DISCLAIMER:
     For authorized use only. Use only in environments where you have explicit permission.
@@ -40,6 +46,7 @@ param(
     [ValidateSet('CSV','JSON','Both')][string]$OutputFormat = 'Both',
     [switch]$SkipAclSweep,
     [switch]$IncludeAclSweep,
+    [switch]$LabMode,
     [switch]$Gui,
     [ValidateSet('Findings','PrivilegedGroups','Delegation','Users','Computers','All')][string]$View = 'Findings',
     [switch]$Report,
@@ -48,9 +55,21 @@ param(
 
 Set-StrictMode -Version Latest
 
-$script:ADScoutVersion      = '1.4.2'
+$script:ADScoutVersion      = '1.5.0'
 $script:ADScoutLastRun      = $null
 $script:ADScoutLastFindings = @()
+
+function Resolve-ADScoutRunData {
+<#
+.SYNOPSIS
+Internal helper -- returns RunData from parameter or session scope.
+Throws a clear error if neither is available.
+#>
+    param([PSCustomObject]$RunData)
+    if ($RunData) { return $RunData }
+    if ($script:ADScoutLastRun) { return $script:ADScoutLastRun }
+    throw "No RunData available. Run: Collect -Preset Standard"
+}
 
 # =============================================================================
 # EXTENDED RIGHTS GUID MAP
@@ -855,11 +874,6 @@ Find-ADScoutAclAttackPath | Where-Object { $_.Rights -match 'GenericAll|WriteDac
     [CmdletBinding()]
     param([string]$Server, [PSCredential]$Credential, [string]$SearchBase)
 
-    # Well-known privileged principal SID suffixes and name fragments to exclude from results.
-    # These holders are expected -- anything else is worth reviewing.
-    $excludePattern = 'Domain Admins|Enterprise Admins|Schema Admins|Administrators|SYSTEM|CREATOR OWNER|' +
-                      'Domain Controllers|S-1-5-18|S-1-5-9|-512|-516|-518|-519|-544'
-
     # Fixed high-value group targets
     $groupTargets = @(
         'Domain Admins', 'Enterprise Admins', 'Schema Admins',
@@ -940,9 +954,13 @@ Find-ADScoutPasswordInDescription
 Find-ADScoutPasswordInDescription | Format-Table SamAccountName, Field, Value -AutoSize
 #>
     [CmdletBinding()]
-    param([string]$Server, [PSCredential]$Credential, [string]$SearchBase)
+    param([string]$Server, [PSCredential]$Credential, [string]$SearchBase, [switch]$LabMode)
 
-    # Fields to check on user objects
+    $keywords = @('pass','pwd','cred','secret','key','login','logon','temp','default',
+                  'welcome','initial','P@ss','changeme')
+    if ($LabMode) { $keywords += @('OS{','HTB{','FLAG{','{') }
+    $pattern  = ($keywords | ForEach-Object { [regex]::Escape($_) }) -join '|'
+
     $userFields = @(
         'description',
         'info',
@@ -963,10 +981,6 @@ Find-ADScoutPasswordInDescription | Format-Table SamAccountName, Field, Value -A
         'physicaldeliveryofficename',
         'location'
     )
-
-    $keywords = @('pass','pwd','cred','secret','key','login','logon','temp','default',
-                  'welcome','initial','P@ss','changeme','OS{','HTB{','FLAG{','{')
-    $pattern  = ($keywords | ForEach-Object { [regex]::Escape($_) }) -join '|'
 
     # Users -- direct LDAP query to get all extended fields
     $userProps = @('samaccountname','distinguishedname') + $userFields
@@ -1573,6 +1587,7 @@ Creates a normalized ADScout finding object.
         [Parameter(Position=6)][string]$RecommendedReview,
         [Parameter(Position=7)][string]$SourceCommand,
         [Parameter(Position=8)][string]$DistinguishedName,
+        [Parameter(Position=9)][string]$ManualVerify,
         [string]$Identity
     )
     if (-not $Identity) { $Identity = $Target }
@@ -1585,6 +1600,7 @@ Creates a normalized ADScout finding object.
         Evidence          = $Evidence
         WhyItMatters      = $WhyItMatters
         RecommendedReview = $RecommendedReview
+        ManualVerify      = $ManualVerify
         SourceCommand     = $SourceCommand
         DistinguishedName = $DistinguishedName
         Timestamp         = Get-Date
@@ -1596,214 +1612,267 @@ function Get-ADScoutFinding {
 .SYNOPSIS
 Returns normalized findings sorted by operational priority.
 .DESCRIPTION
-ACL sweep (Find-ADScoutInterestingAce) is opt-in via -IncludeAclSweep or -Preset Deep.
-DCSync rights always checked -- well-known privileged principals surfaced as Info.
-Stale computers (>90 days) included as Low severity.
+Accepts either a RunData object (preferred -- no re-collection) or legacy
+connection parameters for backward compatibility.
+
+Pass RunData from Invoke-ADScoutCollection for zero-LDAP analysis:
+  Get-ADScoutFinding -RunData $data
+
+Or use legacy mode (re-collects from LDAP):
+  Get-ADScoutFinding -SkipAclSweep
+  Get-ADScoutFinding -IncludeAclSweep
+.EXAMPLE
+$data = Invoke-ADScoutCollection -Preset Standard
+Get-ADScoutFinding -RunData $data | Get-ADScoutSummary
+.EXAMPLE
+Get-ADScoutFinding -RunData $data | Where-Object Severity -eq 'Critical'
 .EXAMPLE
 Get-ADScoutFinding -SkipAclSweep
-.EXAMPLE
-Get-ADScoutFinding -IncludeAclSweep
 #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName='RunData')]
     param(
-        [string]$Server, [PSCredential]$Credential, [string]$SearchBase,
-        [switch]$SkipAclSweep, [switch]$IncludeAclSweep
+        [Parameter(ParameterSetName='RunData', ValueFromPipeline)]
+        [PSCustomObject]$RunData,
+        [Parameter(ParameterSetName='Legacy')][string]$Server,
+        [Parameter(ParameterSetName='Legacy')][PSCredential]$Credential,
+        [Parameter(ParameterSetName='Legacy')][string]$SearchBase,
+        [switch]$SkipAclSweep,
+        [switch]$IncludeAclSweep
     )
-    $runAcl = $IncludeAclSweep.IsPresent -and (-not $SkipAclSweep.IsPresent)
-    $f      = New-Object System.Collections.Generic.List[object]
+    begin { $pipeRunData = $null }
+    process { if ($RunData) { $pipeRunData = $RunData } }
+    end {
+    $rd = Resolve-ADScoutRunData -RunData $pipeRunData
+
+    # Legacy mode -- re-collect if session has no RunData and connection params provided
+    if (-not $rd -and ($Server -or $SearchBase -or $Credential)) {
+        $rd = Invoke-ADScoutCollection -Server $Server -Credential $Credential -SearchBase $SearchBase `
+              -Preset (if ($IncludeAclSweep) { 'Deep' } else { 'Standard' }) `
+              -SkipAclSweep:$SkipAclSweep -IncludeAclSweep:$IncludeAclSweep
+    }
+
+    $runAcl = $rd.Meta.AclSweep -and (-not $SkipAclSweep.IsPresent)
+    $f      = [System.Collections.ArrayList]@()
 
     # Credential/flag content in user-readable fields
-    foreach ($x in Find-ADScoutPasswordInDescription -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $f.Add((New-ADScoutFinding 'Critical' 'Credential Exposure' 'Sensitive content in user-readable AD field' `
+    foreach ($x in @($rd.PasswordInDescription)) {
+        [void]$f.Add((New-ADScoutFinding 'Critical' 'Credential Exposure' 'Sensitive content in user-readable AD field' `
             $x.SamAccountName "Field=$($x.Field); Value=$($x.Value)" `
             "The '$($x.Field)' field is readable by all authenticated users. Credentials or flags stored here are trivially accessible." `
             "Remove the sensitive content from the '$($x.Field)' field and rotate any credentials found." `
-            'Find-ADScoutPasswordInDescription' $x.DistinguishedName))
+            'Find-ADScoutPasswordInDescription' $x.DistinguishedName `
+            "Find-ADScoutPasswordInDescription | Where-Object SamAccountName -eq '$($x.SamAccountName)'"))
     }
 
     # AS-REP roast
-    foreach ($x in Find-ADScoutASREPAccount -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $f.Add((New-ADScoutFinding 'Critical' 'Authentication' 'AS-REP roast candidate' `
-            (Get-ADScoutObjectDisplayName $x) $x.UacFlags `
-            'Kerberos preauthentication is disabled for this account.' `
-            'Review whether preauthentication should be required and whether the account is still needed.' `
-            'Find-ADScoutASREPAccount' $x.DistinguishedName))
+    foreach ($x in @($rd.ASREPAccounts)) {
+        $sam = Get-ADScoutObjectDisplayName $x
+        [void]$f.Add((New-ADScoutFinding 'Critical' 'Authentication' 'AS-REP roast candidate' `
+            $sam $x.UacFlags `
+            'Kerberos preauthentication is disabled. An unauthenticated attacker can request an AS-REP and crack it offline.' `
+            'Enable Kerberos preauthentication unless there is a documented technical requirement.' `
+            'Find-ADScoutASREPAccount' $x.DistinguishedName `
+            "Get-ADScoutUser | Where-Object SamAccountName -eq '$sam' | Select-Object SamAccountName,UacFlags,AdminCount,MemberOf"))
     }
 
-    # --- Machine account quota ---
-    foreach ($x in Get-ADScoutMachineAccountQuota -Server $Server -Credential $Credential -SearchBase $SearchBase |
-             Where-Object { $_.MachineAccountQuota -gt 0 }) {
-        $f.Add((New-ADScoutFinding 'High' 'Domain Configuration' 'Machine account quota is non-zero' `
+    # Machine account quota
+    foreach ($x in @($rd.MachineAccountQuota) | Where-Object { $_.MachineAccountQuota -gt 0 }) {
+        [void]$f.Add((New-ADScoutFinding 'High' 'Domain Configuration' 'Machine account quota is non-zero' `
             "ms-DS-MachineAccountQuota=$($x.MachineAccountQuota)" $x.AbuseRisk `
             'Any authenticated domain user can join machines to the domain. This is a prerequisite for RBCD and shadow credential attacks.' `
             'Set ms-DS-MachineAccountQuota to 0. Use delegated OU permissions for legitimate computer joins.' `
-            'Get-ADScoutMachineAccountQuota' $x.DistinguishedName))
+            'Get-ADScoutMachineAccountQuota' $x.DistinguishedName `
+            'Get-ADScoutMachineAccountQuota'))
     }
 
-    # --- Shadow credentials ---
-    foreach ($x in Find-ADScoutShadowCredential -Server $Server -Credential $Credential -SearchBase $SearchBase) {
+    # Shadow credentials
+    foreach ($x in @($rd.ShadowCredentials)) {
         $sev = if ($x.ObjectClass -eq 'computer' -and $x.KeyCredentialCount -eq 1) { 'Medium' } else { 'High' }
-        $f.Add((New-ADScoutFinding $sev 'Shadow Credentials' 'msDS-KeyCredentialLink present' `
-            $x.SamAccountName "ObjectClass=$($x.ObjectClass); KeyCount=$($x.KeyCredentialCount)" `
+        $sam = $x.SamAccountName
+        [void]$f.Add((New-ADScoutFinding $sev 'Shadow Credentials' 'msDS-KeyCredentialLink present' `
+            $sam "ObjectClass=$($x.ObjectClass); KeyCount=$($x.KeyCredentialCount)" `
             'msDS-KeyCredentialLink enables certificate-based auth. Attacker-controlled entries allow TGT retrieval without the account password.' `
             'Review each KeyCredentialLink entry. Legitimate entries exist for WHFB-enrolled devices. Unexpected entries indicate shadow credential abuse.' `
-            'Find-ADScoutShadowCredential' $x.DistinguishedName))
+            'Find-ADScoutShadowCredential' $x.DistinguishedName `
+            "Find-ADScoutShadowCredential | Where-Object SamAccountName -eq '$sam'"))
     }
 
-    # --- Kerberoast (SPN accounts) ---
-    foreach ($x in Find-ADScoutSPNAccount -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $sev = if ((Get-ADScoutSafeProperty -InputObject $x -Name 'AdminCount') -eq '1') { 'High' } else { 'Medium' }
-        $f.Add((New-ADScoutFinding $sev 'Kerberos' 'SPN-bearing user account' `
-            (Get-ADScoutObjectDisplayName $x) $x.ServicePrincipalName `
-            'User accounts with SPNs are Kerberoast review targets in authorized assessments.' `
-            'Validate service account ownership, password policy, and privilege level.' `
-            'Find-ADScoutSPNAccount' $x.DistinguishedName))
+    # Kerberoast (SPN accounts)
+    foreach ($x in @($rd.SPNAccounts)) {
+        $sev = if ((Get-ADScoutSafeProperty $x 'AdminCount') -eq '1') { 'High' } else { 'Medium' }
+        $sam = Get-ADScoutObjectDisplayName $x
+        [void]$f.Add((New-ADScoutFinding $sev 'Kerberos' 'SPN-bearing user account' `
+            $sam $x.ServicePrincipalName `
+            'Any authenticated user can request a TGS for this SPN. The ticket is encrypted with the account password and can be cracked offline.' `
+            'Use Group Managed Service Accounts (gMSA). Enforce long random passwords on legacy service accounts.' `
+            'Find-ADScoutSPNAccount' $x.DistinguishedName `
+            "Find-ADScoutSPNAccount | Where-Object SamAccountName -eq '$sam' | Select-Object SamAccountName,ServicePrincipalName,AdminCount"))
     }
 
     # Unconstrained delegation
-    foreach ($x in Find-ADScoutUnconstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $f.Add((New-ADScoutFinding 'Critical' 'Delegation' 'Unconstrained delegation on non-DC object' `
-            (Get-ADScoutObjectDisplayName $x) $x.UacFlags `
-            'Unconstrained delegation can expose delegated authentication material if the account/host is compromised.' `
-            'Confirm business need and review delegation configuration.' `
-            'Find-ADScoutUnconstrainedDelegation' $x.DistinguishedName))
+    foreach ($x in @($rd.Delegation) | Where-Object { (Get-ADScoutSafeProperty $_ 'Type') -ne 'KCD' -and (Get-ADScoutSafeProperty $_ 'Type') -ne 'RBCD' }) {
+        $name = Get-ADScoutObjectDisplayName $x
+        [void]$f.Add((New-ADScoutFinding 'Critical' 'Delegation' 'Unconstrained delegation on non-DC object' `
+            $name (Get-ADScoutSafeProperty $x 'UacFlags') `
+            'Any service ticket presented to this host caches the sender TGT in memory. Compromise of this host enables impersonation of any user who connects.' `
+            'Replace unconstrained delegation with constrained or resource-based constrained delegation.' `
+            'Find-ADScoutUnconstrainedDelegation' $x.DistinguishedName `
+            "Find-ADScoutUnconstrainedDelegation | Where-Object { `$_.Name -eq '$name' -or `$_.SamAccountName -eq '$name' }"))
     }
 
     # Constrained delegation
-    foreach ($x in Find-ADScoutConstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $sev = if ($x.Type -eq 'RBCD') { 'High' } else { 'Medium' }
-        $f.Add((New-ADScoutFinding $sev 'Delegation' "$($x.Type) delegation configured" `
-            (Get-ADScoutObjectDisplayName $x) $x.DelegatesTo `
-            'Delegation configuration should be reviewed as part of AD attack-path analysis.' `
-            'Validate target services/principals and intended administration model.' `
-            'Find-ADScoutConstrainedDelegation' $x.DistinguishedName))
+    foreach ($x in @($rd.Delegation) | Where-Object { (Get-ADScoutSafeProperty $_ 'Type') -in @('KCD','RBCD') }) {
+        $sev  = if ($x.Type -eq 'RBCD') { 'High' } else { 'Medium' }
+        $name = Get-ADScoutObjectDisplayName $x
+        [void]$f.Add((New-ADScoutFinding $sev 'Delegation' "$($x.Type) delegation configured" `
+            $name $x.DelegatesTo `
+            'Delegation configuration enables impersonation of users to target services. RBCD is particularly flexible and abusable.' `
+            'Validate target services and principals. Confirm delegation is scoped to the minimum necessary services.' `
+            'Find-ADScoutConstrainedDelegation' $x.DistinguishedName `
+            "Find-ADScoutConstrainedDelegation | Where-Object { `$_.SamAccountName -eq '$name' }"))
     }
 
-    # DCSync rights -- severity pre-computed using SID suffix matching (locale-safe)
-    foreach ($x in Find-ADScoutDCSyncRight -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $f.Add((New-ADScoutFinding $x.Severity 'Replication Rights' 'DCSync-related replication right' `
-            $x.IdentityReference $x.RightName `
-            'Replication rights on the domain root are highly sensitive.' `
-            'Review whether this principal should have directory replication permissions.' `
-            'Find-ADScoutDCSyncRight' $x.DistinguishedName))
+    # DCSync rights
+    foreach ($x in @($rd.DCSyncRights)) {
+        $iref = $x.IdentityReference
+        [void]$f.Add((New-ADScoutFinding $x.Severity 'Replication Rights' 'DCSync-related replication right' `
+            $iref $x.RightName `
+            'Directory replication rights on the domain root allow extraction of all credential material via DCSync.' `
+            'Review whether this principal requires replication rights. Expected: Domain Admins, Domain Controllers, Enterprise Admins.' `
+            'Find-ADScoutDCSyncRight' $x.DistinguishedName `
+            "Find-ADScoutDCSyncRight | Where-Object { `$_.IdentityReference -eq '$iref' }"))
     }
 
     # Password policy
-    foreach ($x in Get-ADScoutPasswordPolicy -Server $Server -Credential $Credential -SearchBase $SearchBase |
-        Where-Object {
-            (Get-ADScoutSafeProperty -InputObject $_ -Name 'LockoutDisabled') -eq $true -or
-            ((Get-ADScoutSafeProperty -InputObject $_ -Name 'MinPwdLength') -ne $null -and
-             [int](Get-ADScoutSafeProperty -InputObject $_ -Name 'MinPwdLength') -lt 12)
-        }) {
-        $f.Add((New-ADScoutFinding 'High' 'Password Policy' 'Password policy review item' `
+    foreach ($x in @($rd.PasswordPolicies) | Where-Object {
+        (Get-ADScoutSafeProperty $_ 'LockoutDisabled') -eq $true -or
+        ((Get-ADScoutSafeProperty $_ 'MinPwdLength') -ne $null -and [int](Get-ADScoutSafeProperty $_ 'MinPwdLength') -lt 12)
+    }) {
+        [void]$f.Add((New-ADScoutFinding 'High' 'Password Policy' 'Password policy review item' `
             $x.Name "MinPwdLength=$($x.MinPwdLength); LockoutThreshold=$($x.LockoutThreshold)" `
-            'Weak password or lockout policy settings can increase account abuse risk.' `
-            'Review password and lockout policy against organizational standards.' `
-            'Get-ADScoutPasswordPolicy' $x.DistinguishedName))
+            'Weak password or lockout policy enables password spraying and brute force. No lockout = unlimited attempts.' `
+            'Set minimum password length >= 12. Configure lockout threshold of 5-10 attempts.' `
+            'Get-ADScoutPasswordPolicy' $x.DistinguishedName `
+            'Get-ADScoutPasswordPolicy | Format-List'))
     }
 
     # Domain trusts
-    foreach ($x in Get-ADScoutDomainTrust -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $f.Add((New-ADScoutFinding 'Info' 'Trusts' 'Domain trust present' `
-            $x.Name "Direction=$($x.TrustDirection); Type=$($x.TrustType); Attr=$($x.TrustAttributes)" `
-            'Trusts expand the AD security boundary and should be mapped.' `
-            'Review trust direction, transitivity, and SID filtering configuration.' `
-            'Get-ADScoutDomainTrust' $x.DistinguishedName))
+    foreach ($x in @($rd.DomainTrusts)) {
+        $sev = if (-not $x.SIDFilteringEnabled -and $x.TrustDirection -eq 'Bidirectional') { 'High' } else { 'Info' }
+        [void]$f.Add((New-ADScoutFinding $sev 'Trusts' 'Domain trust present' `
+            $x.Name "Direction=$($x.TrustDirection); Type=$($x.TrustType); SIDFiltering=$($x.SIDFilteringEnabled)" `
+            'Trusts extend the AD security boundary. Bidirectional trusts without SID filtering enable SID history abuse across domains.' `
+            'Review trust direction, transitivity, and SID filtering. Disable SID history if not required.' `
+            'Get-ADScoutDomainTrust' $x.DistinguishedName `
+            "Get-ADScoutDomainTrust | Where-Object Name -eq '$($x.Name)' | Format-List"))
     }
 
-    # Domain controllers (informational inventory)
-    foreach ($x in Get-ADScoutDomainController -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $f.Add((New-ADScoutFinding 'Info' 'Domain Controllers' 'Domain controller discovered' `
-            (Get-ADScoutObjectDisplayName $x) $x.OperatingSystem `
-            'Domain controllers are Tier 0 assets and should be tracked separately.' `
-            'Use for scoping and defensive review.' `
-            'Get-ADScoutDomainController' $x.DistinguishedName))
+    # Domain controllers (informational)
+    foreach ($x in @($rd.DomainControllers)) {
+        $name = Get-ADScoutObjectDisplayName $x
+        [void]$f.Add((New-ADScoutFinding 'Info' 'Domain Controllers' 'Domain controller discovered' `
+            $name $x.OperatingSystem `
+            'Domain controllers are Tier 0 assets.' `
+            'Use for scoping and attack path analysis.' `
+            'Get-ADScoutDomainController' $x.DistinguishedName `
+            "Get-ADScoutDomainController | Where-Object { `$_.Name -eq '$name' } | Format-List"))
     }
 
     # adminCount orphans
-    foreach ($x in Find-ADScoutAdminSDHolderOrphan -Server $Server -Credential $Credential -SearchBase $SearchBase) {
+    foreach ($x in @($rd.AdminSDHolderObjects)) {
         $target = if ($x.SamAccountName) { $x.SamAccountName } else { $x.Name }
-        $f.Add((New-ADScoutFinding 'Medium' 'Privilege Hygiene' 'adminCount=1 object' `
+        [void]$f.Add((New-ADScoutFinding 'Medium' 'Privilege Hygiene' 'adminCount=1 object' `
             $target $x.ObjectClass `
-            'adminCount=1 may indicate current or historical privileged protection.' `
-            'Review whether object is still privileged and whether ACL inheritance is appropriate.' `
-            'Find-ADScoutAdminSDHolderOrphan' $x.DistinguishedName))
+            'adminCount=1 indicates SDProp has applied the AdminSDHolder ACL. ACL inheritance is broken on this object.' `
+            'Review whether object is still privileged. Re-enable ACL inheritance if no longer protected.' `
+            'Find-ADScoutAdminSDHolderOrphan' $x.DistinguishedName `
+            "Find-ADScoutAdminSDHolderOrphan | Where-Object { `$_.SamAccountName -eq '$target' -or `$_.Name -eq '$target' }"))
     }
 
     # Weak UAC flags
-    foreach ($x in Find-ADScoutWeakUacFlag -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $sev = if ($x.UacFlags -match 'ENCRYPTED_TEXT_PWD_ALLOWED|PASSWD_NOTREQD|USE_DES_KEY_ONLY') { 'High' } else { 'Medium' }
-        $f.Add((New-ADScoutFinding $sev 'Account Flags' 'Weak/review-worthy UAC flag' `
-            (Get-ADScoutObjectDisplayName $x) $x.UacFlags `
-            'UAC flags can reveal relaxed authentication or password controls.' `
-            'Review whether these flags are required.' `
-            'Find-ADScoutWeakUacFlag' $x.DistinguishedName))
+    foreach ($x in @($rd.WeakUacFlags)) {
+        $sev  = if ($x.UacFlags -match 'ENCRYPTED_TEXT_PWD_ALLOWED|PASSWD_NOTREQD|USE_DES_KEY_ONLY') { 'High' } else { 'Medium' }
+        $name = Get-ADScoutObjectDisplayName $x
+        [void]$f.Add((New-ADScoutFinding $sev 'Account Flags' 'Weak/review-worthy UAC flag' `
+            $name $x.UacFlags `
+            'These flags weaken authentication controls: PASSWD_NOTREQD allows empty passwords, USE_DES_KEY_ONLY enables weak encryption.' `
+            'Remove flags unless there is a documented technical requirement.' `
+            'Find-ADScoutWeakUacFlag' $x.DistinguishedName `
+            "Get-ADScoutUser | Where-Object SamAccountName -eq '$name' | Select-Object SamAccountName,UacFlags"))
     }
 
     # LAPS coverage gaps
-    foreach ($x in Get-ADScoutLapsStatus -Server $Server -Credential $Credential -SearchBase $SearchBase |
-        Where-Object { -not $_.HasLegacyLaps -and -not $_.HasWindowsLaps }) {
-        $f.Add((New-ADScoutFinding 'Medium' 'Endpoint Hygiene' 'No visible LAPS metadata' `
-            (Get-ADScoutObjectDisplayName $x) $x.DnsHostName `
-            'Systems without visible LAPS metadata may need local admin password management review.' `
-            'Confirm whether LAPS or another local admin password control is deployed.' `
-            'Get-ADScoutLapsStatus' $x.DistinguishedName))
+    foreach ($x in @($rd.LapsStatus) | Where-Object { -not $_.HasLegacyLaps -and -not $_.HasWindowsLaps }) {
+        $name = Get-ADScoutObjectDisplayName $x
+        [void]$f.Add((New-ADScoutFinding 'Medium' 'Endpoint Hygiene' 'No visible LAPS metadata' `
+            $name $x.DnsHostName `
+            'Systems without LAPS may share local administrator passwords, enabling lateral movement via pass-the-hash.' `
+            'Deploy LAPS or document the alternative local admin password management control.' `
+            'Get-ADScoutLapsStatus' $x.DistinguishedName `
+            "Get-ADScoutLapsStatus | Where-Object { `$_.Name -eq '$name' }"))
     }
 
     # Stale computer accounts
-    foreach ($x in Find-ADScoutOldComputer -Days 90 -Server $Server -Credential $Credential -SearchBase $SearchBase) {
+    foreach ($x in @($rd.StaleComputers)) {
+        $name     = Get-ADScoutObjectDisplayName $x
         $evidence = if ($x.LastLogonTimestamp) { "LastLogonTimestamp=$($x.LastLogonTimestamp)" } else { 'LastLogonTimestamp absent' }
-        $f.Add((New-ADScoutFinding 'Low' 'Endpoint Hygiene' 'Stale computer account (>90 days)' `
-            (Get-ADScoutObjectDisplayName $x) $evidence `
+        [void]$f.Add((New-ADScoutFinding 'Low' 'Endpoint Hygiene' 'Stale computer account (>90 days)' `
+            $name $evidence `
             'Stale computer accounts may represent decommissioned systems still enabled in AD.' `
-            'Confirm whether the account is still in use; disable or remove if not. Note: lastLogonTimestamp has ~14 day replication jitter.' `
-            'Find-ADScoutOldComputer' $x.DistinguishedName))
+            'Confirm whether the account is still in use. Disable or remove if not.' `
+            'Find-ADScoutOldComputer' $x.DistinguishedName `
+            "Find-ADScoutOldComputer -Days 90 | Where-Object { `$_.Name -eq '$name' }"))
     }
 
-    # ACL sweep (opt-in only)
+    # ACL sweep findings (from pre-collected data)
     if ($runAcl) {
-        foreach ($x in Find-ADScoutInterestingAce -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-            $f.Add((New-ADScoutFinding 'High' 'ACL/ACE' 'Interesting ACE on domain root' `
-                $x.IdentityReference "$($x.ActiveDirectoryRights) [$($x.ObjectType)]" `
-                'Powerful ACEs on the domain root can enable privilege escalation or persistence.' `
-                'Review whether this principal requires this permission.' `
-                'Find-ADScoutInterestingAce' $x.DistinguishedName))
-        }
-        foreach ($x in Find-ADScoutAclAttackPath -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-            $f.Add((New-ADScoutFinding 'Critical' 'ACL Attack Path' "Abusable ACE on $($x.TargetType): $($x.TargetObject)" `
-                $x.IdentityReference "$($x.Rights) [$($x.ObjectType)]" `
+        foreach ($x in @($rd.AclAttackPaths)) {
+            $iref = $x.IdentityReference
+            $tgt  = $x.TargetObject
+            [void]$f.Add((New-ADScoutFinding 'Critical' 'ACL Attack Path' "Abusable ACE on $($x.TargetType): $tgt" `
+                $iref "$($x.Rights) [$($x.ObjectType)]" `
                 "A non-privileged principal has $($x.Rights) on a high-value $($x.TargetType) object. Direct privilege escalation path." `
                 'Remove the ACE. GenericAll = full control, WriteDacl = grant self any right, User-Force-Change-Password = reset without knowing current password.' `
-                'Find-ADScoutAclAttackPath' $x.DistinguishedName))
+                'Find-ADScoutAclAttackPath' $x.DistinguishedName `
+                "Get-ADScoutObjectAcl -Identity '$tgt' | Where-Object { `$_.IdentityReference -match '$iref' } | Format-List"))
         }
-        foreach ($x in Find-ADScoutAdminSDHolderAce -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-            $f.Add((New-ADScoutFinding 'Critical' 'Persistence' 'Non-standard ACE on AdminSDHolder' `
-                $x.IdentityReference "$($x.Rights) [$($x.ObjectType)]" `
-                'AdminSDHolder ACEs propagate to all protected objects every 60 minutes via SDProp. This is a persistence and privilege escalation mechanism.' `
+        foreach ($x in @($rd.AdminSDHolderAces)) {
+            $iref = $x.IdentityReference
+            [void]$f.Add((New-ADScoutFinding 'Critical' 'Persistence' 'Non-standard ACE on AdminSDHolder' `
+                $iref "$($x.Rights) [$($x.ObjectType)]" `
+                'AdminSDHolder ACEs propagate to all protected objects every 60 minutes via SDProp. Persistence and privilege escalation mechanism.' `
                 'Remove the non-standard ACE from CN=AdminSDHolder,CN=System,... immediately.' `
-                'Find-ADScoutAdminSDHolderAce' $x.DistinguishedName))
+                'Find-ADScoutAdminSDHolderAce' $x.DistinguishedName `
+                "Find-ADScoutAdminSDHolderAce | Where-Object { `$_.IdentityReference -match '$iref' }"))
         }
-        foreach ($x in Find-ADScoutGPOWritePermission -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-            $sev = if ($x.AppliesToPrivOu) { 'Critical' } else { 'High' }
-            $f.Add((New-ADScoutFinding $sev 'GPO Abuse' 'GPO write permission' `
-                $x.IdentityReference "GPO: $($x.GPOName); OUs: $($x.LinkedOUs); Rights: $($x.Rights)" `
+        foreach ($x in @($rd.GPOWritePermissions)) {
+            $sev  = if ($x.AppliesToPrivOu) { 'Critical' } else { 'High' }
+            $iref = $x.IdentityReference
+            $gpo  = $x.GPOName
+            [void]$f.Add((New-ADScoutFinding $sev 'GPO Abuse' 'GPO write permission' `
+                $iref "GPO: $gpo; OUs: $($x.LinkedOUs); Rights: $($x.Rights)" `
                 $x.AbuseNote `
                 'Review whether this principal requires GPO write access. Prefer read-only delegation.' `
-                'Find-ADScoutGPOWritePermission' $x.DistinguishedName))
+                'Find-ADScoutGPOWritePermission' $x.DistinguishedName `
+                "Find-ADScoutGPOWritePermission | Where-Object { `$_.GPOName -eq '$gpo' -and `$_.IdentityReference -match '$iref' }"))
         }
-        foreach ($x in Find-ADScoutTargetedKerberoastPath -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-            $f.Add((New-ADScoutFinding 'High' 'Kerberos' 'Targeted Kerberoast path' `
-                $x.AttackerPrincipal "Can set SPN on $($x.TargetUser) via $($x.Rights)" `
+        foreach ($x in @($rd.TargetedKerberoastPaths)) {
+            $attk = $x.AttackerPrincipal
+            $tgt  = $x.TargetUser
+            [void]$f.Add((New-ADScoutFinding 'High' 'Kerberos' 'Targeted Kerberoast path' `
+                $attk "Can set SPN on $tgt via $($x.Rights)" `
                 'GenericAll/GenericWrite on a user allows setting an SPN and Kerberoasting the TGS, even if the account had no SPN.' `
                 'Remove the write access or restrict SPN writes via Validated-SPN.' `
-                'Find-ADScoutTargetedKerberoastPath' $x.DistinguishedName))
+                'Find-ADScoutTargetedKerberoastPath' $x.DistinguishedName `
+                "Get-ADScoutObjectAcl -Identity '$tgt' | Where-Object { `$_.IdentityReference -match '$attk' } | Format-List"))
         }
     }
 
-    $rank   = @{Critical=0; High=1; Medium=2; Low=3; Info=4}
-    $items  = @($f | Sort-Object @{Expression={$rank[$_.Severity]}}, Category, Title, Target)
+    $rank  = @{Critical=0; High=1; Medium=2; Low=3; Info=4}
+    $items = @($f | Where-Object { $null -ne $_ } | Sort-Object @{Expression={$rank[$_.Severity]}}, Category, Title, Target)
     $script:ADScoutLastFindings = $items
     return $items
+    } # end end{}
 }
 
 # =============================================================================
@@ -1897,20 +1966,588 @@ Shows selected ADScout views in Out-GridView when available, otherwise console t
 # MAIN ORCHESTRATOR
 # =============================================================================
 
+# =============================================================================
+# COLLECTION LAYER
+# =============================================================================
+
+function Build-ADScoutIndexes {
+<#
+.SYNOPSIS
+Builds fast in-memory lookup indexes from collected RunData for path traversal.
+.DESCRIPTION
+Called internally by Invoke-ADScoutCollection. Builds:
+  GroupMembershipIndex -- groupDN -> array of member DNs (for "who is in this group")
+  UserGroupIndex       -- objectDN -> array of group DNs  (for "what groups is this in")
+  TierZeroObjects      -- set of DNs/names considered Tier 0
+  ObjectByDN           -- DN -> object reference for fast lookup
+  ObjectBySam          -- sAMAccountName -> object reference
+#>
+    param([PSCustomObject]$RunData)
+
+    # -- ObjectByDN and ObjectBySam --
+    $byDn  = @{}
+    $bySam = @{}
+    foreach ($obj in (@($RunData.Users) + @($RunData.Groups) + @($RunData.Computers))) {
+        $dn = Get-ADScoutSafeProperty $obj 'DistinguishedName'
+        if ($dn) { $byDn[$dn] = $obj }
+        foreach ($keyName in @('SamAccountName','Name','DnsHostName')) {
+            $key = Get-ADScoutSafeProperty $obj $keyName
+            if ($key -and -not $bySam.ContainsKey($key)) { $bySam[$key] = $obj }
+        }
+    }
+
+    # -- GroupMembershipIndex: groupDN -> [memberDNs] --
+    $groupIdx = @{}
+    foreach ($entry in @($RunData.PrivilegedGroupMembers)) {
+        $memberDn = Get-ADScoutSafeProperty $entry 'DistinguishedName'
+        $rootGroup = Get-ADScoutSafeProperty $entry 'Group'
+        if (-not $memberDn -or -not $rootGroup) { continue }
+        # Find group DN via bySam
+        $groupObj = if ($bySam.ContainsKey($rootGroup)) { $bySam[$rootGroup] } else { $null }
+        $groupDn  = if ($groupObj) { Get-ADScoutSafeProperty $groupObj 'DistinguishedName' } else { $rootGroup }
+        if (-not $groupIdx.ContainsKey($groupDn)) { $groupIdx[$groupDn] = [System.Collections.ArrayList]@() }
+        [void]$groupIdx[$groupDn].Add($memberDn)
+    }
+    # Also index from raw Groups collection
+    foreach ($grp in @($RunData.Groups)) {
+        $dn      = Get-ADScoutSafeProperty $grp 'DistinguishedName'
+        $members = Get-ADScoutSafeProperty $grp 'Member'
+        if (-not $dn) { continue }
+        if (-not $groupIdx.ContainsKey($dn)) { $groupIdx[$dn] = [System.Collections.ArrayList]@() }
+        if ($members) {
+            foreach ($m in ($members -split ';')) {
+                $m = $m.Trim()
+                if ($m -and -not $groupIdx[$dn].Contains($m)) { [void]$groupIdx[$dn].Add($m) }
+            }
+        }
+    }
+
+    # -- UserGroupIndex: objectDN -> [groupDNs] --
+    $userGroupIdx = @{}
+    foreach ($user in @($RunData.Users)) {
+        $dn       = Get-ADScoutSafeProperty $user 'DistinguishedName'
+        $memberOf = Get-ADScoutSafeProperty $user 'MemberOf'
+        if (-not $dn) { continue }
+        $userGroupIdx[$dn] = [System.Collections.ArrayList]@()
+        if ($memberOf) {
+            foreach ($g in ($memberOf -split ';')) {
+                $g = $g.Trim()
+                if ($g) { [void]$userGroupIdx[$dn].Add($g) }
+            }
+        }
+    }
+
+    # -- TierZeroObjects: canonical Tier 0 set --
+    $t0Names = @(
+        'Domain Admins','Enterprise Admins','Schema Admins','Administrators',
+        'Domain Controllers','Read-only Domain Controllers','Group Policy Creator Owners',
+        'DnsAdmins','Account Operators','Backup Operators','Server Operators','Print Operators'
+    )
+    $t0Dns = [System.Collections.Generic.HashSet[string]]([System.StringComparer]::OrdinalIgnoreCase)
+    # Add by name match
+    foreach ($grp in @($RunData.Groups)) {
+        $name = Get-ADScoutSafeProperty $grp 'Name'
+        $dn   = Get-ADScoutSafeProperty $grp 'DistinguishedName'
+        if ($name -and $dn -and $t0Names -contains $name) { [void]$t0Dns.Add($dn) }
+    }
+    # Add DCs
+    foreach ($dc in @($RunData.DomainControllers)) {
+        $dn = Get-ADScoutSafeProperty $dc 'DistinguishedName'
+        if ($dn) { [void]$t0Dns.Add($dn) }
+    }
+    # Add DA members
+    foreach ($entry in @($RunData.PrivilegedGroupMembers) | Where-Object { (Get-ADScoutSafeProperty $_ 'Group') -eq 'Domain Admins' }) {
+        $dn = Get-ADScoutSafeProperty $entry 'DistinguishedName'
+        if ($dn) { [void]$t0Dns.Add($dn) }
+    }
+    # Add DCSync-capable non-standard principals to Tier 0
+    foreach ($x in @($RunData.DCSyncRights) | Where-Object { $_.Severity -eq 'Critical' }) {
+        $target = Get-ADScoutSafeProperty $x 'IdentityReference'
+        if ($target) { [void]$t0Dns.Add($target) }
+    }
+
+    [PSCustomObject]@{
+        GroupMembershipIndex = $groupIdx
+        UserGroupIndex       = $userGroupIdx
+        TierZeroObjects      = $t0Dns
+        ObjectByDN           = $byDn
+        ObjectBySam          = $bySam
+    }
+}
+
+function Invoke-ADScoutCollection {
+<#
+.SYNOPSIS
+Collects all AD data and returns a structured RunData object.
+.DESCRIPTION
+This is the collection layer. Returns a single RunData object containing all
+collected data, pre-built indexes for path traversal, and metadata.
+Pass the result to Get-ADScoutFinding, Get-ADScoutPathHint, New-ADScoutHtmlReport,
+Show-ADScoutFindingsGui, Export-ADScoutRun, or Get-ADScoutSummary.
+
+Collection is performed once. All analysis functions consume the RunData object
+without re-querying LDAP.
+.EXAMPLE
+$data = Invoke-ADScoutCollection -Preset Standard
+$data | Get-ADScoutFinding | Get-ADScoutSummary
+.EXAMPLE
+$data = Invoke-ADScoutCollection -Preset Deep
+Get-ADScoutPathHint -RunData $data
+New-ADScoutHtmlReport -RunData $data -OutputPath .\report.html
+.EXAMPLE
+$data = Invoke-ADScoutCollection -Preset Standard -Server dc01.corp.local -Credential $cred
+Export-ADScoutRun -RunData $data -Path .\snapshot.json
+#>
+    [CmdletBinding()]
+    param(
+        [ValidateSet('Quick','Standard','Deep')][string]$Preset = 'Standard',
+        [string]$Server, [PSCredential]$Credential, [string]$SearchBase,
+        [switch]$SkipAclSweep, [switch]$IncludeAclSweep,
+        [switch]$LabMode
+    )
+
+    $runAcl = $IncludeAclSweep.IsPresent -or ($Preset -eq 'Deep')
+    if ($SkipAclSweep) { $runAcl = $false }
+
+    $connParams = @{ Server=$Server; Credential=$Credential; SearchBase=$SearchBase }
+
+    Write-Host "[*] ADScoutPS v$script:ADScoutVersion -- collecting ($Preset)..." -ForegroundColor Cyan
+
+    # -- Core objects (all presets) --
+    Write-Host '[*] Core objects...' -ForegroundColor DarkGray
+    $users     = @(Get-ADScoutUser             @connParams)
+    $groups    = @(Get-ADScoutGroup            @connParams)
+    $computers = @(Get-ADScoutComputer         @connParams)
+    $dcs       = @(Get-ADScoutDomainController @connParams)
+    $domInfo   = Get-ADScoutDomainInfo         @connParams
+
+    # -- Extended (Standard+) --
+    $gpos = @(); $ous = @(); $linkedGpos = @(); $trusts = @(); $crossForest = @()
+    if ($Preset -ne 'Quick') {
+        Write-Host '[*] GPOs, OUs, trusts...' -ForegroundColor DarkGray
+        $gpos       = @(Get-ADScoutGPO         -Server $Server -Credential $Credential)
+        $ous        = @(Get-ADScoutOU          @connParams)
+        $linkedGpos = @(Get-ADScoutLinkedGPO   @connParams)
+        $trusts     = @(Get-ADScoutDomainTrust @connParams)
+    }
+
+    # -- Security checks (all presets) --
+    Write-Host '[*] Kerberos, delegation, shadow credentials...' -ForegroundColor DarkGray
+    $pwPolicy   = @(Get-ADScoutPasswordPolicy       @connParams)
+    $maq        = @(Get-ADScoutMachineAccountQuota  @connParams)
+    $pwInDesc   = @(Find-ADScoutPasswordInDescription @connParams -LabMode:$LabMode)
+    $spns       = @(Find-ADScoutSPNAccount          @connParams)
+    $asrep      = @(Find-ADScoutASREPAccount        @connParams)
+    $shadowCred = @(Find-ADScoutShadowCredential    @connParams)
+    $dcsyncRights = @(Find-ADScoutDCSyncRight       @connParams)
+    $delegation = @(
+        @(Find-ADScoutUnconstrainedDelegation @connParams) +
+        @(Find-ADScoutConstrainedDelegation   @connParams)
+    )
+    $adminSDOrphans = @(Find-ADScoutAdminSDHolderOrphan @connParams)
+    $weakUac        = @(Find-ADScoutWeakUacFlag         @connParams)
+    $laps           = @(Get-ADScoutLapsStatus           @connParams)
+    $stale          = @(Find-ADScoutOldComputer -Days 90 @connParams)
+
+    Write-Host '[*] Privileged group membership...' -ForegroundColor DarkGray
+    $privMembers = @(Get-ADScoutGroupReport -PrivilegedOnly -Recursive @connParams)
+    $privPaths   = @($privMembers | Where-Object { $_.MemberType -eq 'user' } |
+                     Select-Object Group, ParentGroup, Member, MemberType, Depth, Path, DistinguishedName)
+
+    # -- ACL sweep (opt-in) --
+    $aclPaths = @(); $adminSDHolderAces = @(); $gpoWritePerms = @()
+    $targetedKerb = @()
+    if ($runAcl) {
+        Write-Host '[*] ACL sweep (this may take a moment)...' -ForegroundColor Cyan
+        $aclPaths         = @(Find-ADScoutAclAttackPath         @connParams)
+        $adminSDHolderAces= @(Find-ADScoutAdminSDHolderAce      @connParams)
+        $gpoWritePerms    = @(Find-ADScoutGPOWritePermission     @connParams)
+        $targetedKerb     = @(Find-ADScoutTargetedKerberoastPath @connParams)
+        $crossForest      = @(Get-ADScoutCrossForestEnum         @connParams)
+    }
+
+    # -- Assemble RunData --
+    $runData = [PSCustomObject][ordered]@{
+        # Metadata
+        Meta = [PSCustomObject]@{
+            Version     = $script:ADScoutVersion
+            Preset      = $Preset
+            AclSweep    = $runAcl
+            LabMode     = $LabMode.IsPresent
+            Timestamp   = Get-Date
+            Server      = $Server
+            SearchBase  = $SearchBase
+            DomainInfo  = $domInfo
+        }
+        # Raw collections
+        Users                = $users
+        Groups               = $groups
+        Computers            = $computers
+        DomainControllers    = $dcs
+        GPOs                 = $gpos
+        OUs                  = $ous
+        LinkedGPOs           = $linkedGpos
+        DomainTrusts         = $trusts
+        PasswordPolicies     = $pwPolicy
+        MachineAccountQuota  = $maq
+        PasswordInDescription= $pwInDesc
+        SPNAccounts          = $spns
+        ASREPAccounts        = $asrep
+        ShadowCredentials    = $shadowCred
+        DCSyncRights         = $dcsyncRights
+        Delegation           = $delegation
+        AdminSDHolderObjects = $adminSDOrphans
+        PrivilegedGroupMembers = $privMembers
+        PrivilegePaths       = $privPaths
+        WeakUacFlags         = $weakUac
+        LapsStatus           = $laps
+        StaleComputers       = $stale
+        AclAttackPaths       = $aclPaths
+        AdminSDHolderAces    = $adminSDHolderAces
+        GPOWritePermissions  = $gpoWritePerms
+        TargetedKerberoastPaths = $targetedKerb
+        CrossForest          = $crossForest
+        # Analysis outputs -- populated after collection
+        Indexes              = $null
+        Findings             = @()
+        PathHints            = @()
+    }
+
+    # -- Build indexes --
+    Write-Host '[*] Building traversal indexes...' -ForegroundColor DarkGray
+    $runData.Indexes = Build-ADScoutIndexes -RunData $runData
+
+    # Store as the active session RunData -- analysis functions use this automatically
+    $script:ADScoutLastRun = $runData
+
+    Write-Host "[+] Collection complete -- $($users.Count) users, $($computers.Count) computers, $($dcs.Count) DCs" -ForegroundColor Green
+    Write-Host "[+] RunData stored in session -- Get-QuickWins, Get-Findings, Get-PathHints work without -RunData" -ForegroundColor DarkGray
+    return $runData
+}
+
+function Export-ADScoutRun {
+<#
+.SYNOPSIS
+Exports a RunData object to a JSON snapshot for offline analysis.
+.EXAMPLE
+Export-ADScoutRun -RunData $data -Path .\snapshot.json
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$RunData,
+        [Parameter(Mandatory)][string]$Path
+    )
+    # Exclude Indexes (not serializable cleanly) -- rebuilt on import
+    $export = [ordered]@{}
+    foreach ($prop in $RunData.PSObject.Properties) {
+        if ($prop.Name -eq 'Indexes') { continue }
+        $export[$prop.Name] = $prop.Value
+    }
+    $export | ConvertTo-Json -Depth 10 | Out-File -FilePath $Path -Encoding UTF8
+    Write-Host "[+] Run exported to $Path" -ForegroundColor Green
+}
+
+function Import-ADScoutRun {
+<#
+.SYNOPSIS
+Imports a RunData JSON snapshot for offline analysis.
+.DESCRIPTION
+Rebuilds traversal indexes automatically on import.
+.EXAMPLE
+$data = Import-ADScoutRun -Path .\snapshot.json
+Get-ADScoutFinding -RunData $data | Get-ADScoutSummary
+#>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    $raw     = Get-Content $Path -Raw | ConvertFrom-Json
+    $runData = [PSCustomObject]$raw
+    # Rebuild indexes
+    $runData | Add-Member -NotePropertyName 'Indexes' -NotePropertyValue $null -Force
+    $runData.Indexes = Build-ADScoutIndexes -RunData $runData
+    $script:ADScoutLastRun = $runData
+    Write-Host "[+] Run imported from $Path ($(($runData.Meta).Timestamp))" -ForegroundColor Green
+    Write-Host "[+] RunData stored in session -- Get-QuickWins, Get-Findings, Get-PathHints work without -RunData" -ForegroundColor DarkGray
+    return $runData
+}
+
+# =============================================================================
+# PATH CHAIN ENGINE
+# =============================================================================
+
+function Get-ADScoutPathHint {
+<#
+.SYNOPSIS
+Discovers chained attack paths from collected RunData.
+.DESCRIPTION
+Walks relationships between collected objects to find multi-hop privilege
+escalation paths without re-querying LDAP. Requires RunData from
+Invoke-ADScoutCollection or Import-ADScoutRun.
+
+Chain types detected:
+  ACE->Kerberoast   -- principal has GenericAll/Write on user with or without SPN
+                       (can set SPN and Kerberoast)
+  ACE->DA           -- principal has abusable ACE on a user/group that is in DA
+  ACE->T0           -- principal has abusable ACE on a Tier 0 object directly
+  Group->DA         -- non-obvious nested group path to Domain Admins
+  SPN->Privesc      -- Kerberoastable account is itself privileged (adminCount=1)
+  ASREP->Privesc    -- AS-REP roastable account has group membership worth cracking for
+  Write->ShadowCred -- principal with write on user can add shadow credential
+
+Each chain includes the full hop sequence, terminal impact, and suggested next command.
+.EXAMPLE
+$data = Invoke-ADScoutCollection -Preset Deep
+Get-ADScoutPathHint -RunData $data
+.EXAMPLE
+Get-ADScoutPathHint -RunData $data -From 'helpdesk'
+.EXAMPLE
+Get-ADScoutPathHint -RunData $data -To 'Domain Admins'
+.EXAMPLE
+Get-ADScoutPathHint -RunData $data | Sort-Object ChainSeverity | Format-List
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline)][PSCustomObject]$RunData,
+        [string]$From,
+        [string]$To
+    )
+
+    $RunData = Resolve-ADScoutRunData -RunData $RunData
+
+    if (-not $RunData.Indexes) {
+        Write-Warning 'RunData has no indexes -- rebuilding...'
+        $RunData.Indexes = Build-ADScoutIndexes -RunData $RunData
+    }
+
+    # Auto-populate findings if empty
+    if (-not $RunData.Findings -or $RunData.Findings.Count -eq 0) {
+        Write-Host '[*] Findings not yet populated -- running Get-ADScoutFinding...' -ForegroundColor DarkGray
+        $RunData.Findings = @(Get-ADScoutFinding -RunData $RunData)
+    }
+
+    $idx     = $RunData.Indexes
+    $t0      = $idx.TierZeroObjects
+    $byDn    = $idx.ObjectByDN
+    $bySam   = $idx.ObjectBySam
+    $chains  = [System.Collections.ArrayList]@()
+
+    function Add-Chain {
+        param($Severity, $Type, $Principal, $Hops, $TerminalImpact, $NextCommand)
+        if ($From -and $Principal -notmatch [regex]::Escape($From)) { return }
+        if ($To   -and $TerminalImpact -notmatch [regex]::Escape($To)) { return }
+        [void]$chains.Add([PSCustomObject][ordered]@{
+            ChainSeverity  = $Severity
+            ChainType      = $Type
+            Principal      = $Principal
+            HopCount       = $Hops.Count
+            Hops           = ($Hops -join ' --> ')
+            TerminalImpact = $TerminalImpact
+            NextCommand    = $NextCommand
+        })
+    }
+
+    # Helper: is a DN or name Tier 0?
+    function Test-IsTierZero {
+        param([string]$Identity)
+        if ($t0.Contains($Identity)) { return $true }
+        foreach ($dn in $t0) { if ($dn -match [regex]::Escape($Identity)) { return $true } }
+        return $false
+    }
+
+    # Helper: get group names a DN is member of
+    function Get-GroupsForDn {
+        param([string]$Dn)
+        $result = @()
+        if ($idx.UserGroupIndex.ContainsKey($Dn)) {
+            $result = @($idx.UserGroupIndex[$Dn])
+        }
+        return $result
+    }
+
+    # Helper: is DN a DA member?
+    function Test-IsDaMember {
+        param([string]$Dn)
+        $groups = Get-GroupsForDn -Dn $Dn
+        foreach ($g in $groups) {
+            if ($g -match 'CN=Domain Admins') { return $true }
+        }
+        # Check via PrivilegedGroupMembers
+        foreach ($entry in @($RunData.PrivilegedGroupMembers)) {
+            $entDn = Get-ADScoutSafeProperty $entry 'DistinguishedName'
+            $entGrp = Get-ADScoutSafeProperty $entry 'Group'
+            if ($entDn -eq $Dn -and $entGrp -eq 'Domain Admins') { return $true }
+        }
+        return $false
+    }
+
+    # -------------------------------------------------------------------------
+    # Chain Type 1: ACE -> Kerberoast (targeted)
+    # Principal has GenericAll/GenericWrite on a user -- can set SPN and Kerberoast
+    # -------------------------------------------------------------------------
+    foreach ($path in @($RunData.TargetedKerberoastPaths)) {
+        $attacker = Get-ADScoutSafeProperty $path 'AttackerPrincipal'
+        $target   = Get-ADScoutSafeProperty $path 'TargetUser'
+        $rights   = Get-ADScoutSafeProperty $path 'Rights'
+        if (-not $attacker -or -not $target) { continue }
+
+        # Is the target already privileged?
+        $targetObj    = if ($bySam.ContainsKey($target)) { $bySam[$target] } else { $null }
+        $targetDn     = if ($targetObj) { Get-ADScoutSafeProperty $targetObj 'DistinguishedName' } else { $null }
+        $targetIsPriv = $targetDn -and (Test-IsDaMember -Dn $targetDn)
+        $targetIsT0   = $targetDn -and (Test-IsTierZero -Identity $targetDn)
+
+        $sev     = if ($targetIsPriv -or $targetIsT0) { 'Critical' } else { 'High' }
+        $impact  = if ($targetIsPriv) { "Kerberoast $target (DA member) -- crack hash = DA" }
+                   elseif ($targetIsT0) { "Kerberoast $target (Tier 0) -- crack hash = Tier 0 access" }
+                   else { "Kerberoast $target -- crack hash = access as $target" }
+
+        Add-Chain $sev 'ACE->Kerberoast' $attacker `
+            @("$attacker has $rights on $target", "Set SPN on $target", "Request TGS", "Crack offline") `
+            $impact "Find-ADScoutTargetedKerberoastPath | Where-Object TargetUser -eq '$target'"
+    }
+
+    # -------------------------------------------------------------------------
+    # Chain Type 2: ACE -> DA (indirect)
+    # Principal has abusable ACE on a user who is a DA member
+    # -------------------------------------------------------------------------
+    foreach ($ace in @($RunData.AclAttackPaths)) {
+        $attacker   = Get-ADScoutSafeProperty $ace 'IdentityReference'
+        $targetObj2 = Get-ADScoutSafeProperty $ace 'TargetObject'
+        $rights2    = Get-ADScoutSafeProperty $ace 'Rights'
+        $tType      = Get-ADScoutSafeProperty $ace 'TargetType'
+        if (-not $attacker -or -not $targetObj2) { continue }
+        if ($tType -ne 'User') { continue }
+
+        # Is target a DA?
+        $tObj  = if ($bySam.ContainsKey($targetObj2)) { $bySam[$targetObj2] } else { $null }
+        $tDn   = if ($tObj) { Get-ADScoutSafeProperty $tObj 'DistinguishedName' } else { $null }
+        if (-not $tDn) { continue }
+        if (Test-IsDaMember -Dn $tDn) {
+            Add-Chain 'Critical' 'ACE->DA' $attacker `
+                @("$attacker has $rights2 on $targetObj2", "$targetObj2 is a Domain Admin", "Abuse $rights2 = control DA account") `
+                "Control Domain Admin account $targetObj2" `
+                "Get-ADScoutObjectAcl -Identity '$targetObj2' | Where-Object { `$_.IdentityReference -match '$attacker' }"
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    # Chain Type 3: ACE -> Tier 0 (direct)
+    # Principal has abusable ACE directly on a Tier 0 group (not user -- covered above)
+    # -------------------------------------------------------------------------
+    foreach ($ace in @($RunData.AclAttackPaths)) {
+        $attacker = Get-ADScoutSafeProperty $ace 'IdentityReference'
+        $target3  = Get-ADScoutSafeProperty $ace 'TargetObject'
+        $rights3  = Get-ADScoutSafeProperty $ace 'Rights'
+        $tType3   = Get-ADScoutSafeProperty $ace 'TargetType'
+        if (-not $attacker -or -not $target3) { continue }
+        if ($tType3 -eq 'User') { continue }  # covered in Type 2
+
+        $tObj3 = if ($bySam.ContainsKey($target3)) { $bySam[$target3] } else { $null }
+        $tDn3  = if ($tObj3) { Get-ADScoutSafeProperty $tObj3 'DistinguishedName' } else { $null }
+        if ($tDn3 -and (Test-IsTierZero -Identity $tDn3)) {
+            Add-Chain 'Critical' 'ACE->Tier0' $attacker `
+                @("$attacker has $rights3 on $target3 ($tType3)", "$target3 is Tier 0", "Abuse $rights3 = Tier 0 control") `
+                "Direct Tier 0 control via $target3" `
+                "Get-ADScoutObjectAcl -Identity '$target3'"
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    # Chain Type 4: SPN account is privileged
+    # Kerberoastable account has adminCount=1 or is a DA -- high-value crack target
+    # -------------------------------------------------------------------------
+    foreach ($spn in @($RunData.SPNAccounts)) {
+        $sam       = Get-ADScoutSafeProperty $spn 'SamAccountName'
+        $adminCnt  = Get-ADScoutSafeProperty $spn 'AdminCount'
+        $dn        = if ($bySam.ContainsKey($sam)) { Get-ADScoutSafeProperty $bySam[$sam] 'DistinguishedName' } else { $null }
+        $isPriv    = ($adminCnt -eq '1') -or ($dn -and (Test-IsDaMember -Dn $dn))
+        if (-not $isPriv) { continue }
+        $sev    = if ($dn -and (Test-IsDaMember -Dn $dn)) { 'Critical' } else { 'High' }
+        $impact = if ($sev -eq 'Critical') { "Crack hash = Domain Admin ($sam)" } else { "Crack hash = privileged access ($sam, adminCount=1)" }
+        Add-Chain $sev 'SPN->Privesc' "Any authenticated user" `
+            @("$sam has SPN (Kerberoastable)", "Request TGS for $sam", "Crack hash") `
+            $impact "Find-ADScoutSPNAccount | Where-Object SamAccountName -eq '$sam'"
+    }
+
+    # -------------------------------------------------------------------------
+    # Chain Type 5: AS-REP account has group memberships worth noting
+    # -------------------------------------------------------------------------
+    foreach ($ar in @($RunData.ASREPAccounts)) {
+        $sam  = Get-ADScoutSafeProperty $ar 'SamAccountName'
+        $dn   = if ($bySam.ContainsKey($sam)) { Get-ADScoutSafeProperty $bySam[$sam] 'DistinguishedName' } else { $null }
+        if (-not $dn) { continue }
+        $isDA = Test-IsDaMember -Dn $dn
+        $isT0 = Test-IsTierZero -Identity $dn
+        if (-not $isDA -and -not $isT0) { continue }
+        $sev    = if ($isDA) { 'Critical' } else { 'High' }
+        $impact = if ($isDA) { "Crack AS-REP hash = Domain Admin ($sam)" } else { "Crack AS-REP hash = Tier 0 access ($sam)" }
+        Add-Chain $sev 'ASREP->Privesc' "Unauthenticated" `
+            @("$sam has preauth disabled (AS-REP roastable)", "Request AS-REP without credentials", "Crack hash") `
+            $impact "Find-ADScoutASREPAccount | Where-Object SamAccountName -eq '$sam'"
+    }
+
+    # -------------------------------------------------------------------------
+    # Chain Type 6: GPO write -> Tier 0 OU
+    # Principal can modify GPO linked to DC/privileged OU
+    # -------------------------------------------------------------------------
+    foreach ($gpo in @($RunData.GPOWritePermissions) | Where-Object { (Get-ADScoutSafeProperty $_ 'AppliesToPrivOu') -eq $true }) {
+        $principal = Get-ADScoutSafeProperty $gpo 'IdentityReference'
+        $gpoName   = Get-ADScoutSafeProperty $gpo 'GPOName'
+        $linkedOUs = Get-ADScoutSafeProperty $gpo 'LinkedOUs'
+        $rights6   = Get-ADScoutSafeProperty $gpo 'Rights'
+        if (-not $principal -or -not $gpoName) { continue }
+        Add-Chain 'Critical' 'GPOWrite->Tier0' $principal `
+            @("$principal has $rights6 on GPO '$gpoName'", "GPO is linked to privileged OU: $linkedOUs", "Modify GPO = code exec as SYSTEM on all in-scope machines") `
+            "SYSTEM execution on Tier 0 machines via GPO '$gpoName'" `
+            "Find-ADScoutGPOWritePermission | Where-Object { `$_.GPOName -eq '$gpoName' }"
+    }
+
+    # -------------------------------------------------------------------------
+    # Chain Type 7: DCSync -> credential dump
+    # Non-standard DCSync right -- always a terminal path
+    # -------------------------------------------------------------------------
+    foreach ($f in @($RunData.Findings) | Where-Object {
+        (Get-ADScoutSafeProperty $_ 'Category') -eq 'Replication Rights' -and
+        (Get-ADScoutSafeProperty $_ 'Severity') -eq 'Critical' }) {
+        $principal = Get-ADScoutSafeProperty $f 'Target'
+        $evidence  = Get-ADScoutSafeProperty $f 'Evidence'
+        if (-not $principal) { continue }
+        Add-Chain 'Critical' 'DCSync->CredDump' $principal `
+            @("$principal holds $evidence", "Can replicate all credential material from DC") `
+            "Full domain compromise via DCSync ($principal)" `
+            "Find-ADScoutDCSyncRight | Where-Object Severity -eq 'Critical'"
+    }
+
+    $result = @($chains | Sort-Object @{Expression={
+        switch ($_.ChainSeverity) { 'Critical'{0} 'High'{1} 'Medium'{2} default{3} }
+    }}, ChainType, Principal)
+
+    $RunData.PathHints = $result
+    return $result
+}
+
+# =============================================================================
+# UPDATED INVOKE-ADSCOUT (now calls Invoke-ADScoutCollection)
+# =============================================================================
+
 function Invoke-ADScout {
 <#
 .SYNOPSIS
-Runs ADScoutPS collection using operator presets.
+All-in-one operator command. Collects, analyzes, exports, and summarizes.
 .DESCRIPTION
+Calls Invoke-ADScoutCollection internally. For interactive/scripted use,
+prefer calling Invoke-ADScoutCollection directly and passing RunData to
+individual functions.
+
 Quick    -- fast core collection, no GPO/OU/trust enumeration, no ACL sweep.
-Standard -- adds GPOs, OUs, trusts, password policy, privileged group report. No ACL sweep.
-Deep     -- full collection including ACL sweep (unless -SkipAclSweep is set).
+Standard -- adds GPOs, OUs, trusts, password policy, privileged group report.
+Deep     -- full collection including ACL sweep and path hint engine.
 .EXAMPLE
 Invoke-ADScout -Preset Quick
 .EXAMPLE
-Invoke-ADScout -Gui -View Findings -SkipAclSweep
-.EXAMPLE
 Invoke-ADScout -Preset Deep -Report
+.EXAMPLE
+$r = Invoke-ADScout -Preset Standard -NoExport
+$r.RunData | Get-ADScoutPathHint
 #>
     [CmdletBinding()]
     param(
@@ -1919,118 +2556,108 @@ Invoke-ADScout -Preset Deep -Report
         [string]$OutputPath = 'ADScout-Results',
         [ValidateSet('CSV','JSON','Both')][string]$OutputFormat = 'Both',
         [switch]$SkipAclSweep, [switch]$IncludeAclSweep,
+        [switch]$LabMode,
         [switch]$Gui,
         [ValidateSet('Findings','PrivilegedGroups','Delegation','Users','Computers','All')]
         [string]$View = 'Findings',
         [switch]$Report, [switch]$NoExport
     )
 
-    $runAcl = $IncludeAclSweep.IsPresent -or ($Preset -eq 'Deep')
-    if ($SkipAclSweep) { $runAcl = $false }
+    # -- Collect --
+    $runData = Invoke-ADScoutCollection -Preset $Preset -Server $Server -Credential $Credential `
+               -SearchBase $SearchBase -SkipAclSweep:$SkipAclSweep -IncludeAclSweep:$IncludeAclSweep `
+               -LabMode:$LabMode
 
-    Write-Host "[*] ADScoutPS v$script:ADScoutVersion collection starting..." -ForegroundColor Cyan
-    Write-Host "[*] Preset: $Preset | ACL sweep: $runAcl"                    -ForegroundColor Cyan
+    # -- Analyze --
+    Write-Host '[*] Running findings engine...' -ForegroundColor DarkGray
+    $findings = @(Get-ADScoutFinding -RunData $runData)
+    $runData.Findings = $findings
 
-    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $runPath   = Join-Path $OutputPath "Run-$timestamp"
-    if (-not $NoExport) { New-Item -ItemType Directory -Path $runPath -Force | Out-Null }
-
-    $data = [ordered]@{}
-    $data.Environment       = @(Test-ADScoutEnvironment  -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.DomainInfo        = @(Get-ADScoutDomainInfo    -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.DomainControllers = @(Get-ADScoutDomainController -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.Users             = @(Get-ADScoutUser          -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.Groups            = @(Get-ADScoutGroup         -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.Computers         = @(Get-ADScoutComputer      -Server $Server -Credential $Credential -SearchBase $SearchBase)
-
-    if ($Preset -ne 'Quick') {
-        $data.GPOs         = @(Get-ADScoutGPO        -Server $Server -Credential $Credential)
-        $data.OUs          = @(Get-ADScoutOU         -Server $Server -Credential $Credential -SearchBase $SearchBase)
-        $data.LinkedGPOs   = @(Get-ADScoutLinkedGPO  -Server $Server -Credential $Credential -SearchBase $SearchBase)
-        $data.DomainTrusts = @(Get-ADScoutDomainTrust -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    } else {
-        $data.GPOs = @(); $data.OUs = @(); $data.LinkedGPOs = @(); $data.DomainTrusts = @()
+    # -- Path hints (Deep or explicit ACL sweep) --
+    if ($runData.Meta.AclSweep) {
+        Write-Host '[*] Running path chain engine...' -ForegroundColor DarkGray
+        $runData.PathHints = @(Get-ADScoutPathHint -RunData $runData)
     }
 
-    $data.PasswordPolicies      = @(Get-ADScoutPasswordPolicy        -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.MachineAccountQuota   = @(Get-ADScoutMachineAccountQuota   -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.PasswordInDescription = @(Find-ADScoutPasswordInDescription -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.SPNAccounts           = @(Find-ADScoutSPNAccount           -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.ASREPAccounts         = @(Find-ADScoutASREPAccount         -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.ShadowCredentials     = @(Find-ADScoutShadowCredential     -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.Delegation            = @(@(Find-ADScoutUnconstrainedDelegation -Server $Server -Credential $Credential -SearchBase $SearchBase) +
-                                    @(Find-ADScoutConstrainedDelegation   -Server $Server -Credential $Credential -SearchBase $SearchBase))
-    $data.AdminSDHolderObjects  = @(Find-ADScoutAdminSDHolderOrphan  -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.PrivilegedGroupMembers= @(Get-ADScoutGroupReport -PrivilegedOnly -Recursive -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.PrivilegePaths        = @(Get-ADScoutPrivilegePath         -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.WeakUacFlags          = @(Find-ADScoutWeakUacFlag          -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.LapsStatus            = @(Get-ADScoutLapsStatus            -Server $Server -Credential $Credential -SearchBase $SearchBase)
-    $data.StaleComputers        = @(Find-ADScoutOldComputer -Days 90  -Server $Server -Credential $Credential -SearchBase $SearchBase)
-
-    if ($runAcl) {
-        Write-Host '[*] Running ACL sweep (may take time on large domains)...' -ForegroundColor Cyan
-        $data.AclAttackPaths          = @(Find-ADScoutAclAttackPath          -Server $Server -Credential $Credential -SearchBase $SearchBase)
-        $data.AdminSDHolderAces       = @(Find-ADScoutAdminSDHolderAce       -Server $Server -Credential $Credential -SearchBase $SearchBase)
-        $data.GPOWritePermissions     = @(Find-ADScoutGPOWritePermission      -Server $Server -Credential $Credential -SearchBase $SearchBase)
-        $data.TargetedKerberoastPaths = @(Find-ADScoutTargetedKerberoastPath  -Server $Server -Credential $Credential -SearchBase $SearchBase)
-        $data.CrossForest             = @(Get-ADScoutCrossForestEnum          -Server $Server -Credential $Credential -SearchBase $SearchBase)
-        $data.Findings                = @(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -IncludeAclSweep)
-    } else {
-        $data.AclAttackPaths          = @()
-        $data.AdminSDHolderAces       = @()
-        $data.GPOWritePermissions     = @()
-        $data.TargetedKerberoastPaths = @()
-        $data.CrossForest             = @()
-        $data.Findings                = @(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -SkipAclSweep)
-    }
-
-    $script:ADScoutLastRun      = [PSCustomObject]$data
-    $script:ADScoutLastFindings = $data.Findings
-
+    # -- Export --
+    $runPath = $null
     if (-not $NoExport) {
-        foreach ($k in $data.Keys) {
+        $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $runPath   = Join-Path $OutputPath "Run-$timestamp"
+        New-Item -ItemType Directory -Path $runPath -Force | Out-Null
+
+        $keys = @('Users','Groups','Computers','DomainControllers','GPOs','OUs','LinkedGPOs',
+                  'DomainTrusts','PasswordPolicies','MachineAccountQuota','PasswordInDescription',
+                  'SPNAccounts','ASREPAccounts','ShadowCredentials','DCSyncRights','Delegation',
+                  'AdminSDHolderObjects','PrivilegedGroupMembers','PrivilegePaths','WeakUacFlags',
+                  'LapsStatus','StaleComputers','AclAttackPaths','AdminSDHolderAces',
+                  'GPOWritePermissions','TargetedKerberoastPaths','CrossForest','Findings','PathHints')
+
+        foreach ($k in $keys) {
+            $val = $runData.$k
+            if ($null -eq $val) { continue }
             $base = Join-Path $runPath $k
-            if ($OutputFormat -in @('CSV','Both'))  { $data[$k] | Export-Csv "$base.csv" -NoTypeInformation }
-            if ($OutputFormat -in @('JSON','Both')) { $data[$k] | ConvertTo-Json -Depth 8 | Out-File "$base.json" -Encoding UTF8 }
+            if ($OutputFormat -in @('CSV','Both'))  { @($val) | Export-Csv "$base.csv" -NoTypeInformation }
+            if ($OutputFormat -in @('JSON','Both')) { @($val) | ConvertTo-Json -Depth 8 | Out-File "$base.json" -Encoding UTF8 }
         }
-        $summary = @('# ADScoutPS Summary', '',
-            "Version: $script:ADScoutVersion", "Preset: $Preset", "ACL sweep: $runAcl", '',
-            '| Collection | Count |', '|---|---:|') +
-            ($data.Keys | ForEach-Object { "| $_ | $($data[$_].Count) |" })
-        $summary | Out-File (Join-Path $runPath 'summary.md') -Encoding UTF8
-        if ($Report) { New-ADScoutHtmlReport -RunData ([PSCustomObject]$data) -OutputPath (Join-Path $runPath 'report.html') | Out-Null }
+
+        $summaryLines = @(
+            '# ADScoutPS Summary', '',
+            "Version   : $script:ADScoutVersion",
+            "Preset    : $Preset",
+            "ACL sweep : $($runData.Meta.AclSweep)",
+            "LabMode   : $($runData.Meta.LabMode)",
+            "Timestamp : $($runData.Meta.Timestamp)", '',
+            '| Collection | Count |', '|---|---:|'
+        ) + ($keys | ForEach-Object { "| $_ | $(@($runData.$_).Count) |" })
+        $summaryLines | Out-File (Join-Path $runPath 'summary.md') -Encoding UTF8
+
+        if ($Report) {
+            New-ADScoutHtmlReport -RunData $runData -OutputPath (Join-Path $runPath 'report.html') | Out-Null
+        }
+
+        # Snapshot export
+        Export-ADScoutRun -RunData $runData -Path (Join-Path $runPath 'snapshot.json')
+
         Write-Host "[+] Results written to $runPath" -ForegroundColor Green
     }
 
-    Write-Host "[!] Critical: $(@($data.Findings | Where-Object Severity -eq 'Critical').Count)" -ForegroundColor Red
-    Write-Host "[!] High:     $(@($data.Findings | Where-Object Severity -eq 'High').Count)"     -ForegroundColor Yellow
-    Write-Host "[!] Low:      $(@($data.Findings | Where-Object Severity -eq 'Low').Count)"      -ForegroundColor DarkYellow
-
-    $data.Findings | Get-ADScoutSummary
-
-    if ($Gui) {
-        Show-ADScoutFindingsGui -View $View -Server $Server -Credential $Credential -SearchBase $SearchBase `
-            -Findings $data.Findings -IncludeAclSweep:$runAcl -SkipAclSweep:(!$runAcl)
+    # -- Summary --
+    Write-Host ''
+    Write-Host "[!] Critical : $(@($findings | Where-Object { $_.Severity -eq 'Critical' }).Count)" -ForegroundColor Red
+    Write-Host "[!] High     : $(@($findings | Where-Object { $_.Severity -eq 'High'     }).Count)" -ForegroundColor Yellow
+    Write-Host "[!] Medium   : $(@($findings | Where-Object { $_.Severity -eq 'Medium'   }).Count)" -ForegroundColor DarkYellow
+    if ($runData.Meta.AclSweep -and $runData.PathHints.Count -gt 0) {
+        Write-Host "[!] Chains   : $($runData.PathHints.Count) attack path(s) chained" -ForegroundColor Magenta
     }
 
+    $findings | Get-ADScoutSummary
+
+    if ($Gui) {
+        Show-ADScoutFindingsGui -View $View -Findings $findings
+    }
+
+    # Return rich object
     [PSCustomObject]@{
-        OutputPath              = if ($NoExport) { $null } else { $runPath }
+        RunData                 = $runData
+        OutputPath              = $runPath
         Preset                  = $Preset
-        AclSweep                = $runAcl
-        Findings                = $data.Findings.Count
-        Critical                = @($data.Findings | Where-Object Severity -eq 'Critical').Count
-        High                    = @($data.Findings | Where-Object Severity -eq 'High').Count
-        Low                     = @($data.Findings | Where-Object Severity -eq 'Low').Count
-        PasswordInDesc          = $data.PasswordInDescription.Count
-        ShadowCredentials       = $data.ShadowCredentials.Count
-        AclAttackPaths          = $data.AclAttackPaths.Count
-        AdminSDHolderAces       = $data.AdminSDHolderAces.Count
-        GPOWritePermissions     = $data.GPOWritePermissions.Count
-        TargetedKerberoastPaths = $data.TargetedKerberoastPaths.Count
-        Users                   = $data.Users.Count
-        Computers               = $data.Computers.Count
-        DomainControllers       = $data.DomainControllers.Count
-        StaleComputers          = $data.StaleComputers.Count
+        AclSweep                = $runData.Meta.AclSweep
+        Findings                = $findings.Count
+        Critical                = @($findings | Where-Object { $_.Severity -eq 'Critical' }).Count
+        High                    = @($findings | Where-Object { $_.Severity -eq 'High'     }).Count
+        Medium                  = @($findings | Where-Object { $_.Severity -eq 'Medium'   }).Count
+        Low                     = @($findings | Where-Object { $_.Severity -eq 'Low'      }).Count
+        PathHints               = $runData.PathHints.Count
+        PasswordInDesc          = $runData.PasswordInDescription.Count
+        ShadowCredentials       = $runData.ShadowCredentials.Count
+        AclAttackPaths          = $runData.AclAttackPaths.Count
+        GPOWritePermissions     = $runData.GPOWritePermissions.Count
+        TargetedKerberoastPaths = $runData.TargetedKerberoastPaths.Count
+        Users                   = $runData.Users.Count
+        Computers               = $runData.Computers.Count
+        DomainControllers       = $runData.DomainControllers.Count
+        StaleComputers          = $runData.StaleComputers.Count
     }
 }
 
@@ -2138,7 +2765,267 @@ Register-ArgumentCompleter -CommandName Get-ADScoutGroupReport -ParameterName Gr
 # SUMMARY
 # =============================================================================
 
-function Get-ADScoutSummary {
+function Get-ADScoutQuickWins {
+<#
+.SYNOPSIS
+Answers one question: what is the shortest path to DA right now?
+.DESCRIPTION
+No noise. No LAPS gaps, stale computers, or informational findings.
+Just the things worth trying, in exploitation order.
+
+Priority order:
+  1. Credentials/flags in readable AD fields (instant win)
+  2. AS-REP roastable accounts that are DA members or adminCount=1
+  3. Kerberoastable accounts that are DA members or adminCount=1
+  4. Unconstrained delegation hosts (coerce + capture TGT)
+  5. Non-privileged principals with DCSync rights
+  6. ACL attack paths to Tier 0 objects
+  7. Targeted Kerberoast paths (GenericWrite -> set SPN -> crack)
+  8. Any user with a nested group path to Domain Admins
+  9. GPO write permissions on privileged OUs
+
+Requires RunData from Invoke-ADScoutCollection.
+For full path chain analysis use Get-ADScoutPathHint -RunData $data.
+.EXAMPLE
+$data = Invoke-ADScoutCollection -Preset Standard -LabMode
+Get-ADScoutQuickWins -RunData $data
+.EXAMPLE
+$data = Invoke-ADScoutCollection -Preset Deep -LabMode
+Get-ADScoutQuickWins -RunData $data | Format-List
+.EXAMPLE
+# All in one
+$r = Invoke-ADScout -Preset Standard -LabMode -NoExport
+Get-ADScoutQuickWins -RunData $r.RunData
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline)][PSCustomObject]$RunData
+    )
+    begin { $rd = $null }
+    process { if ($RunData) { $rd = $RunData } }
+    end {
+        $rd = Resolve-ADScoutRunData -RunData $rd
+        if (-not $rd) { return }
+
+        # Ensure indexes exist
+        if (-not $rd.Indexes) { $rd.Indexes = Build-ADScoutIndexes -RunData $rd }
+
+        $idx    = $rd.Indexes
+        $bySam  = $idx.ObjectBySam
+        $wins   = [System.Collections.ArrayList]@()
+        $rank   = 0
+
+        function Add-Win {
+            param($Priority, $Category, $Title, $Target, $Why, $ManualVerify, $Evidence='')
+            [void]$wins.Add([PSCustomObject][ordered]@{
+                Priority     = $Priority
+                Category     = $Category
+                Title        = $Title
+                Target       = $Target
+                Why          = $Why
+                Evidence     = $Evidence
+                ManualVerify = $ManualVerify
+            })
+        }
+
+        # Helper: is account a DA member or adminCount=1?
+        function Get-AccountPrivLevel {
+            param([string]$Sam)
+            $obj       = if ($bySam.ContainsKey($Sam)) { $bySam[$Sam] } else { $null }
+            $dn        = if ($obj) { Get-ADScoutSafeProperty $obj 'DistinguishedName' } else { $null }
+            $adminCnt  = if ($obj) { Get-ADScoutSafeProperty $obj 'AdminCount' } else { $null }
+            $isAdmin   = $adminCnt -eq '1'
+            $isDA      = $false
+            if ($dn) {
+                foreach ($entry in @($rd.PrivilegedGroupMembers) | Where-Object {
+                    (Get-ADScoutSafeProperty $_ 'Group') -eq 'Domain Admins'
+                }) {
+                    if ((Get-ADScoutSafeProperty $entry 'DistinguishedName') -eq $dn) { $isDA = $true; break }
+                }
+            }
+            [PSCustomObject]@{ IsDA=$isDA; IsAdmin=$isAdmin; DN=$dn }
+        }
+
+        # =============================================================
+        # 1. Credentials / flags in readable fields
+        # =============================================================
+        foreach ($x in @($rd.PasswordInDescription)) {
+            $rank++
+            Add-Win $rank 'Credential Exposure' 'Readable credential/flag in AD field' `
+                $x.SamAccountName `
+                "Field '$($x.Field)' is readable by all authenticated users -- value may be a password or flag." `
+                "Find-ADScoutPasswordInDescription | Where-Object SamAccountName -eq '$($x.SamAccountName)'" `
+                "Field=$($x.Field); Value=$($x.Value)"
+        }
+
+        # =============================================================
+        # 2. AS-REP roastable -- DA or adminCount=1 first
+        # =============================================================
+        $asrepPriv  = @()
+        $asrepOther = @()
+        foreach ($x in @($rd.ASREPAccounts)) {
+            $sam  = Get-ADScoutObjectDisplayName $x
+            $priv = Get-AccountPrivLevel -Sam $sam
+            if ($priv.IsDA -or $priv.IsAdmin) { $asrepPriv  += $x }
+            else                              { $asrepOther += $x }
+        }
+        foreach ($x in ($asrepPriv + $asrepOther)) {
+            $sam  = Get-ADScoutObjectDisplayName $x
+            $priv = Get-AccountPrivLevel -Sam $sam
+            $rank++
+            $label = if ($priv.IsDA) { 'AS-REP roastable DA member -- crack = Domain Admin' }
+                     elseif ($priv.IsAdmin) { 'AS-REP roastable adminCount=1 -- crack = privileged account' }
+                     else { 'AS-REP roastable account' }
+            Add-Win $rank 'AS-REP Roast' $label $sam `
+                'No Kerberos preauthentication required -- request AS-REP without credentials and crack offline.' `
+                "Find-ADScoutASREPAccount | Where-Object { `$_.SamAccountName -eq '$sam' } | Select-Object SamAccountName,UacFlags,AdminCount"
+        }
+
+        # =============================================================
+        # 3. Kerberoastable -- DA or adminCount=1 first
+        # =============================================================
+        $spnPriv  = @()
+        $spnOther = @()
+        foreach ($x in @($rd.SPNAccounts)) {
+            $sam  = Get-ADScoutObjectDisplayName $x
+            $priv = Get-AccountPrivLevel -Sam $sam
+            if ($priv.IsDA -or $priv.IsAdmin) { $spnPriv  += $x }
+            else                              { $spnOther += $x }
+        }
+        foreach ($x in ($spnPriv + $spnOther)) {
+            $sam  = Get-ADScoutObjectDisplayName $x
+            $spn  = Get-ADScoutSafeProperty $x 'ServicePrincipalName'
+            $priv = Get-AccountPrivLevel -Sam $sam
+            $rank++
+            $label = if ($priv.IsDA) { 'Kerberoastable DA member -- crack = Domain Admin' }
+                     elseif ($priv.IsAdmin) { 'Kerberoastable adminCount=1 -- crack = privileged account' }
+                     else { 'Kerberoastable service account' }
+            Add-Win $rank 'Kerberoast' $label $sam `
+                'Request TGS for SPN, crack offline. High value if account is privileged.' `
+                "Find-ADScoutSPNAccount | Where-Object SamAccountName -eq '$sam' | Select-Object SamAccountName,ServicePrincipalName,AdminCount" `
+                $spn
+        }
+
+        # =============================================================
+        # 4. Unconstrained delegation
+        # =============================================================
+        foreach ($x in @($rd.Delegation) | Where-Object {
+            (Get-ADScoutSafeProperty $_ 'Type') -ne 'KCD' -and
+            (Get-ADScoutSafeProperty $_ 'Type') -ne 'RBCD'
+        }) {
+            $name = Get-ADScoutObjectDisplayName $x
+            $rank++
+            Add-Win $rank 'Unconstrained Delegation' 'Coerce auth to this host -- capture TGT' $name `
+                'Any user whose TGT is cached on this host can be impersonated. Coerce a DC to authenticate here via PrinterBug or PetitPotam.' `
+                "Find-ADScoutUnconstrainedDelegation | Where-Object { `$_.Name -eq '$name' -or `$_.SamAccountName -eq '$name' }"
+        }
+
+        # =============================================================
+        # 5. Non-standard DCSync rights
+        # =============================================================
+        foreach ($x in @($rd.DCSyncRights) | Where-Object { $_.Severity -eq 'Critical' }) {
+            $iref = $x.IdentityReference
+            $rank++
+            Add-Win $rank 'DCSync' 'Non-standard DCSync right -- dump all hashes' $iref `
+                "This principal can replicate credential material from the DC. If you control it, run DCSync." `
+                "Find-ADScoutDCSyncRight | Where-Object { `$_.IdentityReference -eq '$iref' }" `
+                $x.RightName
+        }
+
+        # =============================================================
+        # 6. ACL attack paths to Tier 0
+        # =============================================================
+        foreach ($x in @($rd.AclAttackPaths)) {
+            $iref = $x.IdentityReference
+            $tgt  = $x.TargetObject
+            $rank++
+            Add-Win $rank 'ACL Attack Path' "Abusable ACE on $($x.TargetType): $tgt" $iref `
+                "$($x.Rights) on $tgt. Abuse this right to escalate." `
+                "Get-ADScoutObjectAcl -Identity '$tgt' | Where-Object { `$_.IdentityReference -match '$iref' } | Format-List" `
+                "$($x.Rights) [$($x.ObjectType)]"
+        }
+
+        # =============================================================
+        # 7. Targeted Kerberoast paths
+        # =============================================================
+        foreach ($x in @($rd.TargetedKerberoastPaths)) {
+            $attk = $x.AttackerPrincipal
+            $tgt  = $x.TargetUser
+            $rank++
+            Add-Win $rank 'Targeted Kerberoast' "Set SPN on $tgt and Kerberoast" $attk `
+                "$attk has $($x.Rights) on $tgt. Set a SPN, request TGS, crack offline." `
+                "Get-ADScoutObjectAcl -Identity '$tgt' | Where-Object { `$_.IdentityReference -match '$attk' } | Format-List"
+        }
+
+        # =============================================================
+        # 8. Nested group paths to DA
+        # =============================================================
+        foreach ($entry in @($rd.PrivilegePaths) | Where-Object {
+            (Get-ADScoutSafeProperty $_ 'Group') -eq 'Domain Admins' -and
+            (Get-ADScoutSafeProperty $_ 'IsNested') -eq $true
+        }) {
+            $member = Get-ADScoutSafeProperty $entry 'Member'
+            $path   = Get-ADScoutSafeProperty $entry 'Path'
+            $rank++
+            Add-Win $rank 'Privilege Path' 'Nested group path to Domain Admins' $member `
+                "Account reaches Domain Admins via nested group: $path" `
+                "Get-ADScoutGroupMember -Identity 'Domain Admins' -Recursive | Where-Object { `$_.MemberSamAccountName -eq '$member' }" `
+                $path
+        }
+
+        # =============================================================
+        # 9. GPO write on privileged OUs
+        # =============================================================
+        foreach ($x in @($rd.GPOWritePermissions) | Where-Object { (Get-ADScoutSafeProperty $_ 'AppliesToPrivOu') -eq $true }) {
+            $iref = $x.IdentityReference
+            $gpo  = $x.GPOName
+            $rank++
+            Add-Win $rank 'GPO Abuse' "Write access to GPO '$gpo' (privileged OU)" $iref `
+                "Modify this GPO to execute code as SYSTEM on all machines in scope: $($x.LinkedOUs)" `
+                "Find-ADScoutGPOWritePermission | Where-Object { `$_.GPOName -eq '$gpo' }" `
+                "Linked OUs: $($x.LinkedOUs)"
+        }
+
+        if ($wins.Count -eq 0) {
+            Write-Host '[*] No quick wins identified with current collection. Try -Preset Deep -IncludeAclSweep for ACL-based paths.' -ForegroundColor DarkYellow
+            return
+        }
+
+        # Output with color
+        Write-Host ''
+        Write-Host "  ADScoutPS -- Quick Wins ($($wins.Count) found)" -ForegroundColor Cyan
+        Write-Host "  ============================================" -ForegroundColor Cyan
+        Write-Host ''
+
+        foreach ($w in $wins) {
+            $color = switch ($w.Category) {
+                'Credential Exposure'  { 'Red'     }
+                'AS-REP Roast'         { 'Red'     }
+                'Kerberoast'           { 'Yellow'  }
+                'DCSync'               { 'Red'     }
+                'ACL Attack Path'      { 'Red'     }
+                'Unconstrained Delegation' { 'Red' }
+                'Targeted Kerberoast'  { 'Yellow'  }
+                'Privilege Path'       { 'Yellow'  }
+                'GPO Abuse'            { 'Red'     }
+                default                { 'White'   }
+            }
+            Write-Host "  [$($w.Priority)] $($w.Category)" -ForegroundColor $color
+            Write-Host "      Title  : $($w.Title)"        -ForegroundColor White
+            Write-Host "      Target : $($w.Target)"       -ForegroundColor White
+            if ($w.Evidence) {
+                Write-Host "      Evidence: $($w.Evidence)" -ForegroundColor DarkGray
+            }
+            Write-Host "      Why    : $($w.Why)"          -ForegroundColor DarkGray
+            Write-Host "      Verify : $($w.ManualVerify)" -ForegroundColor Cyan
+            Write-Host ''
+        }
+
+        return @($wins)
+    }
+}
+
+
 <#
 .SYNOPSIS
 Prints a concise, color-coded summary of findings grouped by what's actionable.
@@ -2163,8 +3050,15 @@ Get-ADScoutSummary -Findings $results.Findings
     process { if ($Findings) { foreach ($f in $Findings) { [void]$collected.Add($f) } } }
     end {
         if ($collected.Count -eq 0) {
-            Write-Host '[*] No findings passed -- running Get-ADScoutFinding -SkipAclSweep ...' -ForegroundColor Cyan
-            $collected = [System.Collections.ArrayList]@(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -SkipAclSweep)
+            # Try session RunData first, fall back to live collection
+            $rd = $script:ADScoutLastRun
+            if ($rd -and $rd.Findings -and $rd.Findings.Count -gt 0) {
+                Write-Host '[*] Using session RunData findings...' -ForegroundColor DarkGray
+                $collected = [System.Collections.ArrayList]@($rd.Findings)
+            } else {
+                Write-Host '[*] No findings passed -- running Get-Findings ...' -ForegroundColor Cyan
+                $collected = [System.Collections.ArrayList]@(Get-ADScoutFinding -SkipAclSweep)
+            }
         }
 
         $all = @($collected | Where-Object { $null -ne $_ -and $_.PSObject.Properties['Severity'] })
@@ -2236,15 +3130,83 @@ Get-ADScoutSummary -Findings $results.Findings
 }
 
 # =============================================================================
-# ENTRY POINT
-# When dot-sourced ($MyInvocation.InvocationName -eq '.') or imported as a
-# module, the block below is skipped and only functions are loaded.
-# When run directly as a script, Invoke-ADScout fires with the top-level params.
+# =============================================================================
+# ALIASES
+# Short-form aliases for interactive/lab use.
+# Full function names always work -- these just save typing mid-engagement.
 # =============================================================================
 
-if ($MyInvocation.InvocationName -ne '.' -and -not $LoadOnly) {
+# Primary operator workflow
+Set-Alias -Name Collect          -Value Invoke-ADScoutCollection
+Set-Alias -Name Get-QuickWins    -Value Get-ADScoutQuickWins
+Set-Alias -Name Get-Findings     -Value Get-ADScoutFinding
+Set-Alias -Name Get-PathHints    -Value Get-ADScoutPathHint
+Set-Alias -Name Get-Summary      -Value Get-ADScoutSummary
+
+# Collection
+Set-Alias -Name Get-Users        -Value Get-ADScoutUser
+Set-Alias -Name Get-Groups       -Value Get-ADScoutGroup
+Set-Alias -Name Get-Computers    -Value Get-ADScoutComputer
+Set-Alias -Name Get-DCs          -Value Get-ADScoutDomainController
+Set-Alias -Name Get-Trusts       -Value Get-ADScoutDomainTrust
+Set-Alias -Name Get-Policy       -Value Get-ADScoutPasswordPolicy
+Set-Alias -Name Get-GPOs         -Value Get-ADScoutGPO
+Set-Alias -Name Get-OUs          -Value Get-ADScoutOU
+
+# Kerberos / credential
+Set-Alias -Name Find-ASREP       -Value Find-ADScoutASREPAccount
+Set-Alias -Name Find-SPNs        -Value Find-ADScoutSPNAccount
+Set-Alias -Name Find-Shadow      -Value Find-ADScoutShadowCredential
+Set-Alias -Name Find-Passwords   -Value Find-ADScoutPasswordInDescription
+Set-Alias -Name Find-Delegation  -Value Find-ADScoutDelegationHint
+
+# ACL / privilege
+Set-Alias -Name Get-ADACL        -Value Get-ADScoutObjectAcl
+Set-Alias -Name Find-DCSync      -Value Find-ADScoutDCSyncRight
+Set-Alias -Name Find-AclPaths    -Value Find-ADScoutAclAttackPath
+Set-Alias -Name Get-Members      -Value Get-ADScoutGroupMember
+
+# Export / import
+Set-Alias -Name Export-Run       -Value Export-ADScoutRun
+Set-Alias -Name Import-Run       -Value Import-ADScoutRun
+
+# =============================================================================
+# ENTRY POINT
+# Behavior depends on how the file is loaded:
+#
+#   Import-Module .\ADScoutPS.ps1          -- loads functions, auto-runs Collect
+#   Import-Module .\ADScoutPS.ps1 -LabMode -- loads functions, auto-runs Collect -LabMode  
+#   . .\ADScoutPS.ps1 -LoadOnly            -- loads functions only, no collection
+#   . .\ADScoutPS.ps1                      -- loads functions, auto-runs Collect
+#   .\ADScoutPS.ps1 -Preset Deep -Report   -- full Invoke-ADScout run with export/report
+# =============================================================================
+
+$invocationName = $MyInvocation.InvocationName
+
+if ($LoadOnly) {
+    # Explicit load-only -- just register functions and aliases, nothing else
+    Write-Host "[+] ADScoutPS v$script:ADScoutVersion loaded. Run: Collect -Preset Standard -LabMode" -ForegroundColor Cyan
+
+} elseif ($invocationName -eq '' -or $invocationName -eq 'Import-Module') {
+    # Import-Module context -- auto-collect with sensible defaults
+    Write-Host "[*] ADScoutPS v$script:ADScoutVersion -- auto-collecting..." -ForegroundColor Cyan
+    Invoke-ADScoutCollection -Preset $Preset -Server $Server -Credential $Credential `
+        -SearchBase $SearchBase -SkipAclSweep:$SkipAclSweep `
+        -IncludeAclSweep:$IncludeAclSweep -LabMode:$LabMode | Out-Null
+    Write-Host "[+] Ready. Run: Get-QuickWins" -ForegroundColor Green
+
+} elseif ($invocationName -eq '.') {
+    # Dot-source without -LoadOnly -- auto-collect
+    Write-Host "[*] ADScoutPS v$script:ADScoutVersion -- auto-collecting..." -ForegroundColor Cyan
+    Invoke-ADScoutCollection -Preset $Preset -Server $Server -Credential $Credential `
+        -SearchBase $SearchBase -SkipAclSweep:$SkipAclSweep `
+        -IncludeAclSweep:$IncludeAclSweep -LabMode:$LabMode | Out-Null
+    Write-Host "[+] Ready. Run: Get-QuickWins" -ForegroundColor Green
+
+} else {
+    # Direct script execution -- full Invoke-ADScout with export/report/GUI
     Invoke-ADScout -Preset $Preset -Server $Server -Credential $Credential `
         -SearchBase $SearchBase -OutputPath $OutputPath -OutputFormat $OutputFormat `
         -SkipAclSweep:$SkipAclSweep -IncludeAclSweep:$IncludeAclSweep `
-        -Gui:$Gui -View $View -Report:$Report -NoExport:$NoExport
+        -LabMode:$LabMode -Gui:$Gui -View $View -Report:$Report -NoExport:$NoExport
 }
