@@ -48,7 +48,7 @@ param(
 
 Set-StrictMode -Version Latest
 
-$script:ADScoutVersion      = '1.4.0'
+$script:ADScoutVersion      = '1.4.2'
 $script:ADScoutLastRun      = $null
 $script:ADScoutLastFindings = @()
 
@@ -833,7 +833,7 @@ Well-known privileged SID suffixes: -512 (DA), -516 (DC), -518 (Schema Admins),
     return $false
 }
 
-
+function Find-ADScoutAclAttackPath {
 <#
 .SYNOPSIS
 Checks ACLs on high-value AD objects for abusable rights held by non-privileged principals.
@@ -845,7 +845,8 @@ objects — the objects where an abusable ACE actually translates to a privilege
 Abusable rights checked: GenericAll, GenericWrite, WriteDacl, WriteOwner, WriteProperty,
 Self, ExtendedRight.
 
-Well-known privileged principals are filtered from results to reduce noise.
+Well-known privileged principals are filtered via Test-ADScoutPrivilegedIdentity
+(SID-suffix primary, display name fallback — locale-safe).
 .EXAMPLE
 Find-ADScoutAclAttackPath
 .EXAMPLE
@@ -1078,12 +1079,12 @@ Well-known SID suffixes treated as expected/Info:
         '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2',
         '89e95b76-444d-4c62-991a-0facbeda640c'
     )
-    $wellKnownSidSuffixes = @('-512','-516','-518','-519','S-1-5-18','S-1-5-9')
     Get-ADScoutObjectAcl -DistinguishedName $ctx.SearchBase -Server $Server -Credential $Credential -SearchBase $SearchBase |
         Where-Object { $repGuids -contains $_.ObjectTypeGuid } |
         ForEach-Object {
             $identityRef = $_.IdentityReference
-            $isWellKnown = $wellKnownSidSuffixes | Where-Object { $identityRef -match [regex]::Escape($_) }
+            $identitySid = $_.IdentitySid
+            $isWellKnown = Test-ADScoutPrivilegedIdentity -IdentityReference $identityRef -IdentitySid $identitySid
             $sev         = if ($isWellKnown) { 'Info' } else { 'Critical' }
             [PSCustomObject]@{
                 Severity              = $sev
