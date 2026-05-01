@@ -1964,7 +1964,7 @@ Invoke-ADScout -Preset Deep -Report
     Write-Host "[!] High:     $(@($data.Findings | Where-Object Severity -eq 'High').Count)"     -ForegroundColor Yellow
     Write-Host "[!] Low:      $(@($data.Findings | Where-Object Severity -eq 'Low').Count)"      -ForegroundColor DarkYellow
 
-    Get-ADScoutSummary -Findings $data.Findings
+    $data.Findings | Get-ADScoutSummary
 
     if ($Gui) {
         Show-ADScoutFindingsGui -View $View -Server $Server -Credential $Credential -SearchBase $SearchBase `
@@ -2117,15 +2117,15 @@ Get-ADScoutSummary -Findings $results.Findings
         [Parameter(ValueFromPipeline)][object[]]$Findings,
         [string]$Server, [PSCredential]$Credential, [string]$SearchBase
     )
-    begin   { $collected = New-Object System.Collections.Generic.List[object] }
-    process { if ($Findings) { foreach ($f in $Findings) { $collected.Add($f) } } }
+    begin   { $collected = [System.Collections.ArrayList]@() }
+    process { if ($Findings) { foreach ($f in $Findings) { [void]$collected.Add($f) } } }
     end {
         if ($collected.Count -eq 0) {
             Write-Host '[*] No findings passed -- running Get-ADScoutFinding -SkipAclSweep ...' -ForegroundColor Cyan
-            $collected = @(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -SkipAclSweep)
+            $collected = [System.Collections.ArrayList]@(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -SkipAclSweep)
         }
 
-        $all = @($collected)
+        $all = @($collected | Where-Object { $null -ne $_ -and $_.PSObject.Properties['Severity'] })
 
         Write-Host ''
         Write-Host '+==========================================+' -ForegroundColor Cyan
@@ -2134,11 +2134,11 @@ Get-ADScoutSummary -Findings $results.Findings
         Write-Host ''
 
         # Severity counts
-        $critical = @($all | Where-Object Severity -eq 'Critical').Count
-        $high     = @($all | Where-Object Severity -eq 'High').Count
-        $medium   = @($all | Where-Object Severity -eq 'Medium').Count
-        $low      = @($all | Where-Object Severity -eq 'Low').Count
-        $info     = @($all | Where-Object Severity -eq 'Info').Count
+        $critical = @($all | Where-Object { $_.Severity -eq 'Critical' }).Count
+        $high     = @($all | Where-Object { $_.Severity -eq 'High'     }).Count
+        $medium   = @($all | Where-Object { $_.Severity -eq 'Medium'   }).Count
+        $low      = @($all | Where-Object { $_.Severity -eq 'Low'      }).Count
+        $info     = @($all | Where-Object { $_.Severity -eq 'Info'     }).Count
 
         Write-Host '  Severity Breakdown' -ForegroundColor White
         if ($critical -gt 0) { Write-Host "    Critical : $critical" -ForegroundColor Red }
@@ -2174,23 +2174,20 @@ Get-ADScoutSummary -Findings $results.Findings
         Write-Host '  Actionable Findings' -ForegroundColor White
         $anyHit = $false
         foreach ($c in $checks) {
-            $hits = @($all | Where-Object { $_.Title -match $c.Pattern -and $_.Severity -ne 'Info' })
+            $hits = @($all | Where-Object { $null -ne $_.Title -and $_.Title -match $c.Pattern -and $_.Severity -ne 'Info' })
             if ($hits.Count -gt 0) {
                 $anyHit = $true
                 Write-Host "    [+] $($c.Label): $($hits.Count) hit(s)" -ForegroundColor $c.Color
-                $hits | ForEach-Object {
-                    Write-Host "        -> $($_.Target)" -ForegroundColor DarkGray
-                }
+                $hits | ForEach-Object { Write-Host "        -> $($_.Target)" -ForegroundColor DarkGray }
             }
         }
         if (-not $anyHit) { Write-Host '    None above threshold.' -ForegroundColor DarkGray }
 
-        # Info -- trusts and DCs just as a count
         Write-Host ''
         Write-Host '  Inventory (Info)' -ForegroundColor White
-        $dcCount    = @($all | Where-Object { $_.Title -match 'Domain controller discovered' }).Count
-        $trustCount = @($all | Where-Object { $_.Title -match 'Domain trust present' }).Count
-        Write-Host "    Domain Controllers : $dcCount"  -ForegroundColor DarkGray
+        $dcCount    = @($all | Where-Object { $null -ne $_.Title -and $_.Title -match 'Domain controller discovered' }).Count
+        $trustCount = @($all | Where-Object { $null -ne $_.Title -and $_.Title -match 'Domain trust present'        }).Count
+        Write-Host "    Domain Controllers : $dcCount"    -ForegroundColor DarkGray
         Write-Host "    Domain Trusts      : $trustCount" -ForegroundColor DarkGray
         Write-Host ''
     }
