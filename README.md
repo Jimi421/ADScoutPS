@@ -1,15 +1,15 @@
 # ADScoutPS
 
 > PowerShell Active Directory enumeration and findings toolkit.  
-> One file. No dependencies. No RSAT required.
+> One file. No RSAT. No ActiveDirectory module. No dependencies.
 
 ---
 
 ## What it is
 
-ADScoutPS is a single-file PowerShell script for read-only Active Directory enumeration. It collects domain data, identifies misconfigurations, and surfaces findings with context — not just raw LDAP dumps.
+ADScoutPS is a single-file PowerShell script for read-only Active Directory enumeration. It collects domain data, identifies misconfigurations, and surfaces findings with context — severity, abuse note, and recommended review — not just raw LDAP dumps.
 
-It works as an `Import-Module` target, a dot-sourced function library, or a standalone script you drop on a Windows box and run directly. No companion files. No installation. No internet access required.
+Drop it on any Windows box with domain connectivity and run it. No installation. No companion files. No internet access required. Any authenticated domain user can run core collection.
 
 **Authorized use only.** Use in environments where you have explicit written permission.
 
@@ -18,10 +18,10 @@ It works as an `Import-Module` target, a dot-sourced function library, or a stan
 ## Quick start
 
 ```powershell
-# Run directly — Standard preset, export CSV + JSON
+# Standard run — exports CSV + JSON, prints summary banner
 .\ADScoutPS.ps1
 
-# Quick run, skip ACL sweep, no export
+# Quick scan, no export
 .\ADScoutPS.ps1 -Preset Quick -NoExport
 
 # Full run with ACL sweep and HTML report
@@ -36,27 +36,24 @@ powershell -ExecutionPolicy Bypass -File .\ADScoutPS.ps1 -Preset Quick
 
 ---
 
-## Loading functions
+## Loading functions interactively
+
+The preferred method for interactive use is dot-sourcing:
 
 ```powershell
-# Import as module — all functions available, no collection runs
-Import-Module .\ADScoutPS.ps1
-
-# Dot-source
-. .\ADScoutPS.ps1
-
-# Dot-source with explicit load-only flag
+# Dot-source — loads all functions, does not run collection
 . .\ADScoutPS.ps1 -LoadOnly
-```
 
-Once loaded, run anything manually:
-
-```powershell
+# Then run anything manually
 Test-ADScoutEnvironment
 Get-ADScoutDomainInfo
 Get-ADScoutUser | Format-Table SamAccountName, UacFlags -AutoSize
 Get-ADScoutFinding -SkipAclSweep | Get-ADScoutSummary
 ```
+
+> **Note on `Import-Module`:** `Import-Module .\ADScoutPS.ps1` works but will execute the
+> entry point block unless you pass `-LoadOnly`. Using `. .\ADScoutPS.ps1 -LoadOnly` is the
+> cleaner and more predictable path for interactive sessions.
 
 ---
 
@@ -64,15 +61,15 @@ Get-ADScoutFinding -SkipAclSweep | Get-ADScoutSummary
 
 | Preset | What runs | ACL sweep |
 |---|---|---|
-| `Quick` | Core objects (users, groups, computers, DCs, password policy, Kerberos, delegation, LAPS) | No |
-| `Standard` | Quick + GPOs, OUs, trusts, linked GPO map, privileged group report | No |
-| `Deep` | Standard + ACL sweep on domain root and high-value targets | Yes |
+| `Quick` | Core objects — users, groups, computers, DCs, Kerberos, delegation, LAPS, password policy, shadow credentials, machine account quota | No |
+| `Standard` | Quick + GPOs, OUs, trusts (decoded), linked GPO map, privileged group report, cross-trust enumeration | No |
+| `Deep` | Standard + full ACL sweep — AdminSDHolder, GPO write perms, targeted Kerberoast paths, ACL attack paths | Yes |
 
-ACL sweep can be forced on or off regardless of preset:
+Force ACL sweep on or off regardless of preset:
 
 ```powershell
 .\ADScoutPS.ps1 -Preset Standard -IncludeAclSweep   # add ACL sweep to Standard
-.\ADScoutPS.ps1 -Preset Deep -SkipAclSweep           # run Deep without ACL sweep
+.\ADScoutPS.ps1 -Preset Deep -SkipAclSweep           # Deep without ACL sweep
 ```
 
 ---
@@ -95,17 +92,14 @@ ACL sweep can be forced on or off regardless of preset:
 | `Timestamp` | When the finding was generated |
 
 ```powershell
-# All findings, skip ACL sweep
+# All findings, no ACL sweep
 Get-ADScoutFinding -SkipAclSweep
 
-# With ACL sweep
+# With full ACL sweep
 Get-ADScoutFinding -IncludeAclSweep
 
 # Filter by severity
 Get-ADScoutFinding -SkipAclSweep | Where-Object Severity -eq 'Critical'
-
-# Table view
-Get-ADScoutFinding -SkipAclSweep | Format-Table Severity, Category, Title, Target -AutoSize
 
 # Pipe to summary banner
 Get-ADScoutFinding -SkipAclSweep | Get-ADScoutSummary
@@ -113,23 +107,29 @@ Get-ADScoutFinding -SkipAclSweep | Get-ADScoutSummary
 
 ### Finding coverage
 
-| Category | Finding | Severity |
-|---|---|---|
-| Credential Exposure | Password in AD description field | Critical |
-| Authentication | AS-REP roast candidate (no Kerberos preauth) | Critical |
-| Delegation | Unconstrained delegation on non-DC object | Critical |
-| Replication Rights | DCSync-capable right held by non-privileged principal | Critical |
-| ACL Attack Path | Abusable ACE on privileged group, DA account, krbtgt, or DC | Critical |
-| Kerberos | SPN-bearing user account (Kerberoast candidate) | High / Medium |
-| Delegation | RBCD configured | High |
-| Delegation | KCD configured | Medium |
-| Password Policy | Min length < 12 or lockout disabled | High |
-| Account Flags | PASSWD_NOTREQD / ENCRYPTED_TEXT_PWD / USE_DES_KEY_ONLY | High / Medium |
-| Privilege Hygiene | adminCount=1 object (current or historical) | Medium |
-| Endpoint Hygiene | No visible LAPS metadata | Medium |
-| Endpoint Hygiene | Stale computer account (>90 days) | Low |
-| Trusts | Domain trust present | Info |
-| Domain Controllers | DC inventory | Info |
+| Category | Finding | Severity | ACL sweep required |
+|---|---|---|---|
+| Credential Exposure | Password in AD description field | Critical | No |
+| Authentication | AS-REP roast candidate (preauth disabled) | Critical | No |
+| Delegation | Unconstrained delegation on non-DC | Critical | No |
+| Replication Rights | DCSync right held by non-privileged principal | Critical | No |
+| Persistence | Non-standard ACE on AdminSDHolder | Critical | Yes |
+| ACL Attack Path | Abusable ACE on privileged group / DA / krbtgt / DC | Critical | Yes |
+| GPO Abuse | GPO write access linked to privileged OU | Critical | Yes |
+| Domain Configuration | Machine account quota is non-zero | High | No |
+| Kerberos | SPN-bearing user account (Kerberoast candidate) | High / Medium | No |
+| Kerberos | Targeted Kerberoast path (GenericAll/Write on user) | High | Yes |
+| Shadow Credentials | msDS-KeyCredentialLink present | High / Medium | No |
+| Delegation | RBCD configured | High | No |
+| Password Policy | Min length < 12 or lockout disabled | High | No |
+| Account Flags | PASSWD_NOTREQD / ENCRYPTED_TEXT_PWD / USE_DES_KEY_ONLY | High / Medium | No |
+| Trusts | Bidirectional trust without SID filtering | High | No |
+| Delegation | KCD configured | Medium | No |
+| Privilege Hygiene | adminCount=1 object (current or historical) | Medium | No |
+| Endpoint Hygiene | No visible LAPS metadata | Medium | No |
+| Endpoint Hygiene | Stale computer account (>90 days) | Low | No |
+| Trusts | Domain trust inventory | Info | No |
+| Domain Controllers | DC inventory | Info | No |
 
 ---
 
@@ -143,7 +143,7 @@ Test-ADScoutEnvironment
 Test-ADScoutEnvironment -Server dc01.corp.local -Credential $cred
 ```
 
-`Test-ADScoutEnvironment` validates domain discovery, LDAP bind, current identity, PowerShell version, and Out-GridView availability before you run a full collection.
+`Test-ADScoutEnvironment` validates domain discovery, LDAP bind, current identity, PowerShell version, machine account quota, and Out-GridView availability before a full collection run.
 
 ---
 
@@ -151,11 +151,25 @@ Test-ADScoutEnvironment -Server dc01.corp.local -Credential $cred
 
 ```powershell
 Get-ADScoutDomainInfo
-Get-ADScoutDomainTrust
-Get-ADScoutPasswordPolicy
+Get-ADScoutDomainTrust        # decoded direction, type, SID filtering, forest trust flags
+Get-ADScoutPasswordPolicy     # default domain + fine-grained PSOs
+Get-ADScoutMachineAccountQuota
 ```
 
-`Get-ADScoutPasswordPolicy` returns both the default domain policy and any fine-grained password policies (PSOs) readable by the current user.
+`Get-ADScoutDomainTrust` decodes `TrustDirection` (Bidirectional/Inbound/Outbound/Disabled) and `TrustType` (Uplevel/Downlevel/MIT/DCE) and adds `SIDFilteringEnabled`, `IsTransitive`, and `IsForestTrust` as explicit boolean fields.
+
+`Get-ADScoutMachineAccountQuota` reads `ms-DS-MachineAccountQuota`. Non-zero means any authenticated user can join machines to the domain — a prerequisite for RBCD and shadow credential attacks.
+
+---
+
+### Cross-trust enumeration
+
+```powershell
+Get-ADScoutCrossForestEnum
+Get-ADScoutCrossForestEnum -Credential $cred
+```
+
+Follows trust relationships and attempts collection from each reachable trusted domain — DC count, user count, computer count. Skips outbound-only trusts. Returns `Status`, `SIDFilteringEnabled`, and `IsForestTrust` per domain.
 
 ---
 
@@ -164,10 +178,14 @@ Get-ADScoutPasswordPolicy
 ```powershell
 Get-ADScoutUser
 Get-ADScoutUser | Where-Object { $_.AdminCount -eq 1 }
+Get-ADScoutUser | Where-Object { $_.HasShadowCredential }
 Get-ADScoutUser | Where-Object { $_.ServicePrincipalName }
 ```
 
-All users include decoded `UacFlags` — a comma-separated list of set UAC flag names (e.g. `NORMAL_ACCOUNT,DONT_EXPIRE_PASSWORD`).
+All users include:
+- `UacFlags` — decoded UAC flag names (e.g. `NORMAL_ACCOUNT,DONT_EXPIRE_PASSWORD`)
+- `HasShadowCredential` — `$true` if `msDS-KeyCredentialLink` is set
+- `AdminCount` — `1` if SDProp has applied
 
 ```powershell
 ConvertTo-ADScoutUacFlag -UserAccountControl 66048
@@ -180,48 +198,43 @@ ConvertTo-ADScoutUacFlag -UserAccountControl 66048
 
 ```powershell
 Get-ADScoutGroup
-Find-ADScoutAdminGroup
+Find-ADScoutAdminGroup         # groups matching admin/operator/backup name patterns
 
-# Direct members of Domain Admins
 Get-ADScoutGroupMember -Identity 'Domain Admins'
-
-# Recursive with nesting depth and path
 Get-ADScoutGroupMember -Identity 'Domain Admins' -Recursive
 
-# Report for multiple groups
 Get-ADScoutGroupReport -GroupName 'Domain Admins','Backup Operators' -Recursive
-
-# All privileged groups
 Get-ADScoutGroupReport -PrivilegedOnly -Recursive
 
-# Who has a path to a privileged group
-Get-ADScoutPrivilegePath
+Get-ADScoutPrivilegePath       # users with a path to a privileged group
 ```
 
-`Get-ADScoutGroupMember` resolves every member DN and returns name, samAccountName, objectClass, nesting depth, and the full membership path (e.g. `Domain Admins -> nested_group -> user`).
+`Get-ADScoutGroupMember` resolves every member DN and returns `MemberObjectClass`, nesting depth, and the full membership path string (e.g. `Domain Admins -> nested_group -> user`).
 
 ---
 
 ### Computers
 
 ```powershell
-Get-ADScoutComputer
+Get-ADScoutComputer            # includes Description and HasShadowCredential
 Get-ADScoutDomainController
 Get-ADScoutLapsStatus
-Find-ADScoutOldComputer           # default 90 days
+Find-ADScoutOldComputer        # default 90 days
 Find-ADScoutOldComputer -Days 60
 ```
 
-`Get-ADScoutLapsStatus` checks both legacy LAPS (`ms-Mcs-AdmPwdExpirationTime`) and Windows LAPS (`msLAPS-PasswordExpirationTime`) attributes. Visibility depends on your read rights.
+`Get-ADScoutComputer` includes `Description` — needed for `Find-ADScoutPasswordInDescription` to check computer accounts. `HasShadowCredential` is `$true` if `msDS-KeyCredentialLink` is set.
+
+`Get-ADScoutLapsStatus` checks both legacy LAPS (`ms-Mcs-AdmPwdExpirationTime`) and Windows LAPS (`msLAPS-PasswordExpirationTime`). Actual password readability depends on your delegation rights.
 
 ---
 
 ### Kerberos
 
 ```powershell
-Find-ADScoutASREPAccount           # DONT_REQUIRE_PREAUTH
-Get-ADScoutAsRepRoastCandidate     # alias for above
-Find-ADScoutSPNAccount             # servicePrincipalName set
+Find-ADScoutASREPAccount       # DONT_REQUIRE_PREAUTH set
+Get-ADScoutAsRepRoastCandidate # alias
+Find-ADScoutSPNAccount         # servicePrincipalName set (Kerberoast candidates)
 ```
 
 ---
@@ -231,16 +244,26 @@ Find-ADScoutSPNAccount             # servicePrincipalName set
 ```powershell
 Find-ADScoutUnconstrainedDelegation
 Find-ADScoutUnconstrainedDelegation -IncludeDomainControllers
-Find-ADScoutConstrainedDelegation   # returns both KCD and RBCD
+Find-ADScoutConstrainedDelegation   # returns KCD and RBCD
 Find-ADScoutDelegationHint          # both in one call
 ```
+
+---
+
+### Shadow credentials
+
+```powershell
+Find-ADScoutShadowCredential
+```
+
+Finds accounts with `msDS-KeyCredentialLink` set. Legitimate entries exist for Windows Hello for Business enrolled devices. Unexpected entries allow TGT retrieval without knowing the account password.
 
 ---
 
 ### ACL
 
 ```powershell
-# ACL on a specific object by friendly name
+# ACL on any object — GUIDs resolved to human-readable right names
 Get-ADScoutObjectAcl -Identity 'Domain Admins' -ObjectClass group
 Get-ADScoutObjectAcl -Identity 'krbtgt'
 Get-ADScoutObjectAcl -DistinguishedName 'CN=krbtgt,CN=Users,DC=corp,DC=local'
@@ -248,20 +271,47 @@ Get-ADScoutObjectAcl -DistinguishedName 'CN=krbtgt,CN=Users,DC=corp,DC=local'
 # Interesting ACEs on the domain root
 Find-ADScoutInterestingAce
 
-# Interesting ACEs on a specific object
+# Specific object
 Find-ADScoutInterestingAce -Identity 'Domain Admins'
 
-# DCSync rights on domain root
+# DCSync rights — non-privileged holders Critical, expected holders Info
 Find-ADScoutDCSyncRight
 
-# ACL attack paths against all high-value targets
+# ACL attack paths on all high-value targets (ACL sweep)
 Find-ADScoutAclAttackPath
 Find-ADScoutAclAttackPath | Where-Object { $_.Rights -match 'GenericAll|WriteDacl' }
+
+# AdminSDHolder non-standard ACEs (ACL sweep)
+Find-ADScoutAdminSDHolderAce
+
+# GPO write permissions (ACL sweep)
+Find-ADScoutGPOWritePermission
+Find-ADScoutGPOWritePermission | Where-Object AppliesToPrivOu
+
+# Targeted Kerberoast paths (ACL sweep)
+Find-ADScoutTargetedKerberoastPath
 ```
 
-`Find-ADScoutAclAttackPath` sweeps ACLs against: all privileged groups, krbtgt, every Domain Admin user account, and every DC computer object. Non-privileged principals with abusable rights are returned. Well-known privileged SIDs are excluded by SID suffix (locale-safe).
+**ACE output fields:**
 
-`Find-ADScoutDCSyncRight` checks for `DS-Replication-Get-Changes`, `DS-Replication-Get-Changes-All`, and `DS-Replication-Get-Changes-In-Filtered-Set`. Well-known legitimate holders (Domain Admins, Domain Controllers, Enterprise Admins, SYSTEM) are returned as `Info` severity. Everyone else is `Critical`.
+| Field | Description |
+|---|---|
+| `IdentityReference` | Display name of the principal (e.g. `CORP\helpdesk`) |
+| `IdentitySid` | Resolved SID string — locale-safe privileged identity filtering |
+| `ActiveDirectoryRights` | Raw AD rights flags |
+| `ObjectType` | Human-readable extended right / attribute name (GUID resolved) |
+| `ObjectTypeGuid` | Raw GUID (preserved for programmatic use) |
+| `InheritedObjectType` | Resolved inherited scope name |
+| `InheritedObjectTypeGuid` | Raw inherited GUID |
+| `IsInherited` | Whether the ACE is inherited |
+
+**`Find-ADScoutAclAttackPath`** sweeps ACLs on all privileged groups, `krbtgt`, every DA member account, and every DC. Non-privileged principals with abusable rights returned. Exclusions use `Test-ADScoutPrivilegedIdentity` — SID-suffix check first (locale-safe), display name second (English fallback).
+
+**`Find-ADScoutAdminSDHolderAce`** sweeps `CN=AdminSDHolder,CN=System,...`. Non-standard ACEs here propagate to all `adminCount=1` objects every 60 minutes via SDProp.
+
+**`Find-ADScoutGPOWritePermission`** maps GPO ACLs to linked OUs. Write access to a GPO linked to a privileged OU is Critical — modify the GPO, get SYSTEM on every machine in scope.
+
+**`Find-ADScoutTargetedKerberoastPath`** finds `GenericAll`/`GenericWrite` on user objects — enough to set a SPN and Kerberoast the TGS even with no pre-existing SPN.
 
 ---
 
@@ -271,7 +321,7 @@ Find-ADScoutAclAttackPath | Where-Object { $_.Rights -match 'GenericAll|WriteDac
 Find-ADScoutPasswordInDescription
 ```
 
-Scans all user and computer description fields for password-related keywords. AD description fields are readable by all authenticated domain users by default.
+Scans all user and computer `description` fields for password-related keywords. Description is readable by all authenticated domain users by default.
 
 ---
 
@@ -288,15 +338,12 @@ Get-ADScoutLinkedGPO    # OUs with linked GPOs only
 ### Findings and summary
 
 ```powershell
-# Collect findings
 $findings = Get-ADScoutFinding -SkipAclSweep
 
-# Summary banner
 Get-ADScoutSummary
 Get-ADScoutSummary -Findings $findings
 $findings | Get-ADScoutSummary
 
-# GUI dashboard (requires Windows PowerShell or pwsh with Out-GridView)
 Show-ADScoutFindingsGui -View Findings
 Show-ADScoutFindingsGui -View PrivilegedGroups
 Show-ADScoutFindingsGui -View Delegation
@@ -313,7 +360,7 @@ Show-ADScoutFindingsGui -View All
 
 ```
 ADScout-Results\
-└── Run-20260430-143022\
+└── Run-20260501-143022\
     ├── Environment.csv / .json
     ├── DomainInfo.csv / .json
     ├── DomainControllers.csv / .json
@@ -325,11 +372,17 @@ ADScout-Results\
     ├── LinkedGPOs.csv / .json
     ├── DomainTrusts.csv / .json
     ├── PasswordPolicies.csv / .json
+    ├── MachineAccountQuota.csv / .json
     ├── PasswordInDescription.csv / .json
     ├── SPNAccounts.csv / .json
     ├── ASREPAccounts.csv / .json
+    ├── ShadowCredentials.csv / .json
     ├── Delegation.csv / .json
     ├── AclAttackPaths.csv / .json
+    ├── AdminSDHolderAces.csv / .json
+    ├── GPOWritePermissions.csv / .json
+    ├── TargetedKerberoastPaths.csv / .json
+    ├── CrossForest.csv / .json
     ├── AdminSDHolderObjects.csv / .json
     ├── PrivilegedGroupMembers.csv / .json
     ├── PrivilegePaths.csv / .json
@@ -341,14 +394,12 @@ ADScout-Results\
     └── report.html          # when -Report is used
 ```
 
-Control output format and location:
-
 ```powershell
-.\ADScoutPS.ps1 -OutputFormat CSV                       # CSV only
-.\ADScoutPS.ps1 -OutputFormat JSON                      # JSON only
-.\ADScoutPS.ps1 -OutputPath C:\Temp\ADScan             # custom path
-.\ADScoutPS.ps1 -NoExport                               # no files written
-.\ADScoutPS.ps1 -Report                                 # include HTML report
+.\ADScoutPS.ps1 -OutputFormat CSV
+.\ADScoutPS.ps1 -OutputFormat JSON
+.\ADScoutPS.ps1 -OutputPath C:\Temp\ADScan
+.\ADScoutPS.ps1 -NoExport
+.\ADScoutPS.ps1 -Report
 ```
 
 ---
@@ -356,17 +407,10 @@ Control output format and location:
 ## Alternate targets
 
 ```powershell
-# Explicit domain controller
 Invoke-ADScout -Server dc01.corp.local
-
-# Alternate credentials
 $cred = Get-Credential
 Invoke-ADScout -Credential $cred -Server dc01.corp.local
-
-# Specific search base (scope collection to an OU)
 Invoke-ADScout -SearchBase 'OU=Workstations,DC=corp,DC=local'
-
-# Remote domain from a non-domain-joined box
 Invoke-ADScout -Server dc01.external.local -Credential $cred -SearchBase 'DC=external,DC=local'
 ```
 
@@ -374,21 +418,25 @@ Invoke-ADScout -Server dc01.external.local -Credential $cred -SearchBase 'DC=ext
 
 ## How it works
 
-ADScoutPS uses `System.DirectoryServices` — the .NET namespace that wraps LDAP — with no dependency on the ActiveDirectory PowerShell module or RSAT. Every query is a standard LDAP search against port 389. Any authenticated domain user can run it. No elevated privileges required for core enumeration (some ACL reads may require higher access depending on domain hardening).
+ADScoutPS uses `System.DirectoryServices` — the .NET namespace that wraps LDAP — directly. No ActiveDirectory module, no RSAT, no binaries beyond the script itself. Every query is a standard LDAP search against port 389. The CLR already present on any Windows system is the only runtime requirement.
 
-Because it runs entirely through the CLR already present on any Windows system, no binaries touch disk beyond the script itself.
+ACL reads use `DirectoryEntry.ObjectSecurity.Access` to retrieve the DACL. `ObjectType` and `InheritedObjectType` GUIDs are resolved against a built-in static map of 60+ AD schema and extended rights GUIDs. `IdentitySid` is resolved per ACE using `NTAccount.Translate(SecurityIdentifier)` with a graceful `$null` fallback. Privileged identity exclusion in all ACL sweep functions uses `Test-ADScoutPrivilegedIdentity`, which checks resolved SID suffix first (locale-safe) and falls back to display name matching — making the tool correct on non-English Active Directory deployments.
 
 ---
 
 ## Caveats
 
-**`lastLogonTimestamp` jitter** — the stale computer detection uses `lastLogonTimestamp`, which AD replicates on a 9–14 day interval by design. Results carry up to ~2 weeks of inherent fuzziness. A machine that appears stale may have authenticated within that window.
+**`lastLogonTimestamp` jitter** — stale computer detection uses `lastLogonTimestamp`, which AD replicates on a 9–14 day interval by design. Results carry up to ~2 weeks of inherent fuzziness.
 
-**LAPS visibility** — `Get-ADScoutLapsStatus` checks for the presence of LAPS attributes, not whether the password is readable. A computer showing `HasLegacyLaps=True` means the attribute exists; whether the current user can read the password value depends on delegation configured in the environment.
+**LAPS visibility** — `Get-ADScoutLapsStatus` checks for attribute presence, not password readability. Whether the current user can read the password value depends on delegation in the environment.
 
-**ACL sweep noise** — `Find-ADScoutAclAttackPath` and `Find-ADScoutInterestingAce` filter well-known privileged principals by SID suffix rather than by name (locale-safe). In highly customized environments, legitimate delegations may surface as findings. Review each result in context.
+**ACL sweep performance** — `Find-ADScoutAclAttackPath` and `Find-ADScoutTargetedKerberoastPath` perform per-object ACL reads. On large production domains this will be slow. Both are gated behind `-IncludeAclSweep` / `-Preset Deep`. In OSCP/PEN-200 lab environments the cost is negligible.
 
-**DCSync expected holders** — `Find-ADScoutDCSyncRight` always enumerates replication rights. Principals matching well-known SID suffixes (`-512`, `-516`, `-518`, `-519`, `S-1-5-18`, `S-1-5-9`) are returned as `Info`. Everything else is `Critical`.
+**ACL sweep noise** — in highly customized environments, legitimate delegations may surface as findings. Review each result in context.
+
+**DCSync expected holders** — `Find-ADScoutDCSyncRight` always enumerates all replication rights holders. Principals matching well-known SID suffixes (`-512`, `-516`, `-518`, `-519`, `S-1-5-18`, `S-1-5-9`) are returned as `Info`. Everything else is `Critical`.
+
+**Shadow credentials** — `Find-ADScoutShadowCredential` flags all accounts with `msDS-KeyCredentialLink` set. Legitimate entries exist for Windows Hello for Business enrolled devices. Review each entry before concluding abuse.
 
 ---
 
