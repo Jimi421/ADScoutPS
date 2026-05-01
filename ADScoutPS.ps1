@@ -928,45 +928,87 @@ Finds admin/privileged-looking groups by name pattern.
 function Find-ADScoutPasswordInDescription {
 <#
 .SYNOPSIS
-Finds user and computer accounts with password-like content in the description field.
+Finds user and computer accounts with credential or flag content in any readable string field.
 .DESCRIPTION
-A common misconfiguration in real environments -- admins set temporary passwords in the
-AD description field and forget to remove them. Description is readable by all
-authenticated users by default.
+Checks description, info, comment, physicalDeliveryOfficeName, homeDirectory,
+scriptPath, and profilePath. All are readable by authenticated domain users by default.
+Lab designers and admins commonly store passwords, credentials, or flags in these fields.
+The keyword pattern is intentionally broad -- review all results in context.
 .EXAMPLE
 Find-ADScoutPasswordInDescription
+.EXAMPLE
+Find-ADScoutPasswordInDescription | Format-Table SamAccountName, Field, Value -AutoSize
 #>
     [CmdletBinding()]
     param([string]$Server, [PSCredential]$Credential, [string]$SearchBase)
-    $keywords = @('pass','pwd','cred','secret','key','login','logon','temp','default','welcome','initial','P@ss','changeme')
+
+    # Fields to check on user objects
+    $userFields = @(
+        'description',
+        'info',
+        'comment',
+        'physicaldeliveryofficename',
+        'homedirectory',
+        'scriptpath',
+        'profilepath',
+        'homephone',
+        'streetaddress'
+    )
+
+    # Fields to check on computer objects
+    $computerFields = @(
+        'description',
+        'info',
+        'comment',
+        'physicaldeliveryofficename',
+        'location'
+    )
+
+    $keywords = @('pass','pwd','cred','secret','key','login','logon','temp','default',
+                  'welcome','initial','P@ss','changeme','OS{','HTB{','FLAG{','{')
     $pattern  = ($keywords | ForEach-Object { [regex]::Escape($_) }) -join '|'
 
-    $users = Get-ADScoutUser -Server $Server -Credential $Credential -SearchBase $SearchBase |
-        Where-Object { $_.Description -and $_.Description -match $pattern } |
-        ForEach-Object {
-            [PSCustomObject]@{
-                ObjectType        = 'user'
-                SamAccountName    = $_.SamAccountName
-                Description       = $_.Description
-                DistinguishedName = $_.DistinguishedName
+    # Users -- direct LDAP query to get all extended fields
+    $userProps = @('samaccountname','distinguishedname') + $userFields
+    $us = New-ADScoutSearcher -Filter '(&(objectCategory=person)(objectClass=user))' `
+          -Properties $userProps -Server $Server -Credential $Credential -SearchBase $SearchBase
+    foreach ($r in $us.FindAll()) {
+        $sam = Get-ADScoutProperty $r 'samaccountname'
+        $dn  = Get-ADScoutProperty $r 'distinguishedname'
+        foreach ($field in $userFields) {
+            $val = Get-ADScoutProperty $r $field
+            if ($val -and $val -match $pattern) {
+                [PSCustomObject]@{
+                    ObjectType        = 'user'
+                    SamAccountName    = $sam
+                    Field             = $field
+                    Value             = $val
+                    DistinguishedName = $dn
+                }
             }
         }
+    }
 
-    $computers = Get-ADScoutComputer -Server $Server -Credential $Credential -SearchBase $SearchBase |
-        Where-Object { 
-            $desc = Get-ADScoutSafeProperty -InputObject $_ -Name 'Description'
-            $desc -and $desc -match $pattern
-        } |
-        ForEach-Object {
-            [PSCustomObject]@{
-                ObjectType        = 'computer'
-                SamAccountName    = $_.Name
-                Description       = (Get-ADScoutSafeProperty -InputObject $_ -Name 'Description')
-                DistinguishedName = $_.DistinguishedName
+    # Computers -- direct LDAP query
+    $compProps = @('name','distinguishedname') + $computerFields
+    $cs = New-ADScoutSearcher -Filter '(objectCategory=computer)' `
+          -Properties $compProps -Server $Server -Credential $Credential -SearchBase $SearchBase
+    foreach ($r in $cs.FindAll()) {
+        $name = Get-ADScoutProperty $r 'name'
+        $dn   = Get-ADScoutProperty $r 'distinguishedname'
+        foreach ($field in $computerFields) {
+            $val = Get-ADScoutProperty $r $field
+            if ($val -and $val -match $pattern) {
+                [PSCustomObject]@{
+                    ObjectType        = 'computer'
+                    SamAccountName    = $name
+                    Field             = $field
+                    Value             = $val
+                    DistinguishedName = $dn
+                }
             }
         }
-
-    @($users) + @($computers)
+    }
 }
 
 # =============================================================================
@@ -1570,12 +1612,12 @@ Get-ADScoutFinding -IncludeAclSweep
     $runAcl = $IncludeAclSweep.IsPresent -and (-not $SkipAclSweep.IsPresent)
     $f      = New-Object System.Collections.Generic.List[object]
 
-    # Password in description field
+    # Credential/flag content in user-readable fields
     foreach ($x in Find-ADScoutPasswordInDescription -Server $Server -Credential $Credential -SearchBase $SearchBase) {
-        $f.Add((New-ADScoutFinding 'Critical' 'Credential Exposure' 'Password in description field' `
-            $x.SamAccountName $x.Description `
-            'AD description fields are readable by all authenticated users. Passwords stored here are trivially accessible.' `
-            'Remove the credential from the description field immediately and rotate the password.' `
+        $f.Add((New-ADScoutFinding 'Critical' 'Credential Exposure' 'Sensitive content in user-readable AD field' `
+            $x.SamAccountName "Field=$($x.Field); Value=$($x.Value)" `
+            "The '$($x.Field)' field is readable by all authenticated users. Credentials or flags stored here are trivially accessible." `
+            "Remove the sensitive content from the '$($x.Field)' field and rotate any credentials found." `
             'Find-ADScoutPasswordInDescription' $x.DistinguishedName))
     }
 
@@ -2150,7 +2192,7 @@ Get-ADScoutSummary -Findings $results.Findings
 
         # Actionable hit checks -- ordered by exploitation directness
         $checks = @(
-            @{ Pattern='Password in description';               Label='Cleartext creds in description';  Color='Red'        }
+            @{ Pattern='Sensitive content in user-readable';     Label='Cleartext creds/flags in AD fields'; Color='Red'        }
             @{ Pattern='AS-REP roast candidate';                Label='AS-REP Roast';                    Color='Red'        }
             @{ Pattern='Non-standard ACE on AdminSDHolder';     Label='AdminSDHolder persistence ACE';   Color='Red'        }
             @{ Pattern='Abusable ACE on';                       Label='ACL attack path on HVT';          Color='Red'        }
