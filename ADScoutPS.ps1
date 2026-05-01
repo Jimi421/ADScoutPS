@@ -4,7 +4,7 @@ ADScoutPS v1.4.0 - PowerShell Active Directory Enumeration Toolkit
 
 .DESCRIPTION
 Read-only AD enumeration for authorized lab environments and approved internal assessments.
-Single-file design — works as Import-Module target, dot-source, or direct script execution.
+Single-file design -- works as Import-Module target, dot-source, or direct script execution.
 No RSAT. No ActiveDirectory module. No dependencies beyond the Windows .NET runtime.
 
 USAGE:
@@ -19,11 +19,11 @@ DISCLAIMER:
     For authorized use only. Use only in environments where you have explicit permission.
 
 v1.4.0 additions:
-    - Full extended rights GUID resolution (190+ GUIDs) — ACEs show human-readable
+    - Full extended rights GUID resolution (190+ GUIDs) -- ACEs show human-readable
       right names everywhere instead of raw GUIDs
-    - Targeted Kerberoast path detection — GenericAll/GenericWrite on a user = can set SPN
-    - GPO write permission detection — who can modify GPOs linked to privileged OUs
-    - AdminSDHolder ACL sweep — non-standard ACEs on the AdminSDHolder object
+    - Targeted Kerberoast path detection -- GenericAll/GenericWrite on a user = can set SPN
+    - GPO write permission detection -- who can modify GPOs linked to privileged OUs
+    - AdminSDHolder ACL sweep -- non-standard ACEs on the AdminSDHolder object
     - Machine account quota and shadow credential (msDS-KeyCredentialLink) detection
     - Cross-trust domain enumeration
     - TrustDirection and TrustType decoded to human-readable strings
@@ -687,7 +687,7 @@ Returns default domain password policy and fine-grained password policies where 
 function Find-ADScoutAdminSDHolderOrphan {
 <#
 .SYNOPSIS
-Finds adminCount=1 users/groups — current or historical privileged objects.
+Finds adminCount=1 users/groups -- current or historical privileged objects.
 #>
     [CmdletBinding()]
     param([string]$Server, [PSCredential]$Credential, [string]$SearchBase)
@@ -787,7 +787,7 @@ function Find-ADScoutOldComputer {
 Finds computer accounts that have not authenticated within the specified number of days.
 .DESCRIPTION
 Converts lastLogonTimestamp via [datetime]::FromFileTime() for accurate comparison.
-Note: lastLogonTimestamp replicates on a 9-14 day jitter by design — results carry
+Note: lastLogonTimestamp replicates on a 9-14 day jitter by design -- results carry
 inherent fuzziness of up to ~2 weeks. Accounts with no lastLogonTimestamp are always
 included as they may have never authenticated.
 .EXAMPLE
@@ -822,10 +822,10 @@ Well-known privileged SID suffixes: -512 (DA), -516 (DC), -518 (Schema Admins),
         [string]$IdentityReference,
         [string]$IdentitySid
     )
-    # SID-suffix match — locale-safe, primary check
+    # SID-suffix match -- locale-safe, primary check
     $privilegedSidPattern = '-512$|-516$|-518$|-519$|-544$|^S-1-5-18$|^S-1-5-9$'
     if ($IdentitySid -and $IdentitySid -match $privilegedSidPattern) { return $true }
-    # Name-pattern match — English fallback / additional coverage
+    # Name-pattern match -- English fallback / additional coverage
     $privilegedNamePattern = 'Domain Admins|Enterprise Admins|Schema Admins|Administrators|' +
                              'SYSTEM|CREATOR OWNER|Domain Controllers|NT AUTHORITY\\SYSTEM|' +
                              'NT AUTHORITY\\ENTERPRISE DOMAIN CONTROLLERS'
@@ -840,13 +840,13 @@ Checks ACLs on high-value AD objects for abusable rights held by non-privileged 
 .DESCRIPTION
 Find-ADScoutInterestingAce only checks the domain root. This function sweeps ACLs on
 specific high-value targets: privileged groups, krbtgt, DA user accounts, and DC computer
-objects — the objects where an abusable ACE actually translates to a privilege escalation path.
+objects -- the objects where an abusable ACE actually translates to a privilege escalation path.
 
 Abusable rights checked: GenericAll, GenericWrite, WriteDacl, WriteOwner, WriteProperty,
 Self, ExtendedRight.
 
 Well-known privileged principals are filtered via Test-ADScoutPrivilegedIdentity
-(SID-suffix primary, display name fallback — locale-safe).
+(SID-suffix primary, display name fallback -- locale-safe).
 .EXAMPLE
 Find-ADScoutAclAttackPath
 .EXAMPLE
@@ -856,7 +856,7 @@ Find-ADScoutAclAttackPath | Where-Object { $_.Rights -match 'GenericAll|WriteDac
     param([string]$Server, [PSCredential]$Credential, [string]$SearchBase)
 
     # Well-known privileged principal SID suffixes and name fragments to exclude from results.
-    # These holders are expected — anything else is worth reviewing.
+    # These holders are expected -- anything else is worth reviewing.
     $excludePattern = 'Domain Admins|Enterprise Admins|Schema Admins|Administrators|SYSTEM|CREATOR OWNER|' +
                       'Domain Controllers|S-1-5-18|S-1-5-9|-512|-516|-518|-519|-544'
 
@@ -871,7 +871,7 @@ Find-ADScoutAclAttackPath | Where-Object { $_.Rights -match 'GenericAll|WriteDac
     # Add krbtgt account
     $userTargets = @('krbtgt')
 
-    # Add individual DA members (users only — so an ACE on a DA account is visible)
+    # Add individual DA members (users only -- so an ACE on a DA account is visible)
     try {
         $daMembers = @(Get-ADScoutGroupMember -Identity 'Domain Admins' -Recursive `
                        -Server $Server -Credential $Credential -SearchBase $SearchBase |
@@ -930,7 +930,7 @@ function Find-ADScoutPasswordInDescription {
 .SYNOPSIS
 Finds user and computer accounts with password-like content in the description field.
 .DESCRIPTION
-A common misconfiguration in real environments — admins set temporary passwords in the
+A common misconfiguration in real environments -- admins set temporary passwords in the
 AD description field and forget to remove them. Description is readable by all
 authenticated users by default.
 .EXAMPLE
@@ -1227,7 +1227,7 @@ Expands common privileged groups to identify privileged user members.
 function Find-ADScoutDelegationHint {
 <#
 .SYNOPSIS
-Compatibility wrapper — returns all delegation review items.
+Compatibility wrapper -- returns all delegation review items.
 #>
     [CmdletBinding()]
     param([string]$Server, [PSCredential]$Credential, [string]$SearchBase)
@@ -1265,7 +1265,7 @@ function Get-ADScoutMachineAccountQuota {
 Returns the ms-DS-MachineAccountQuota value for the domain.
 .DESCRIPTION
 A non-zero value means any authenticated user can add that many computer accounts
-to the domain — a prerequisite for RBCD and shadow credential attacks.
+to the domain -- a prerequisite for RBCD and shadow credential attacks.
 .EXAMPLE
 Get-ADScoutMachineAccountQuota
 #>
@@ -1278,9 +1278,9 @@ Get-ADScoutMachineAccountQuota
     [PSCustomObject]@{
         MachineAccountQuota = $maqInt
         AbuseRisk           = if ($maqInt -gt 0) {
-                                  "Non-zero ($maqInt) — any authenticated user can add computer accounts (RBCD/ShadowCred prerequisite)"
+                                  "Non-zero ($maqInt) -- any authenticated user can add computer accounts (RBCD/ShadowCred prerequisite)"
                               } else {
-                                  'Zero — only privileged users can add computer accounts'
+                                  'Zero -- only privileged users can add computer accounts'
                               }
         DistinguishedName   = $ctx.SearchBase
     }
@@ -1346,7 +1346,7 @@ Find-ADScoutAdminSDHolderAce
                     ObjectType        = $_.ObjectType
                     ObjectTypeGuid    = $_.ObjectTypeGuid
                     IsInherited       = $_.IsInherited
-                    AbuseNote         = 'ACE on AdminSDHolder propagates to all protected objects via SDProp — persistence/privesc path'
+                    AbuseNote         = 'ACE on AdminSDHolder propagates to all protected objects via SDProp -- persistence/privesc path'
                     DistinguishedName = $asdnDn
                 }
             }
@@ -1410,8 +1410,8 @@ Find-ADScoutGPOWritePermission | Where-Object AppliesToPrivOu
                     LinkedOUs         = ($linkedOus -join '; ')
                     AppliesToPrivOu   = ([bool]$isPrivOu)
                     AbuseNote         = if ($isPrivOu) {
-                                            'GPO linked to privileged OU — write access enables code exec on in-scope machines'
-                                        } else { 'GPO write access — review scope' }
+                                            'GPO linked to privileged OU -- write access enables code exec on in-scope machines'
+                                        } else { 'GPO write access -- review scope' }
                     DistinguishedName = $gpo.DistinguishedName
                 }
             }
@@ -1425,7 +1425,7 @@ function Find-ADScoutTargetedKerberoastPath {
 Finds principals that can perform a targeted Kerberoast attack.
 .DESCRIPTION
 GenericAll or GenericWrite on a user account allows an attacker to set an arbitrary SPN
-on that account, request a TGS, and crack it offline — even if the account had no SPN.
+on that account, request a TGS, and crack it offline -- even if the account had no SPN.
 This function identifies non-privileged principals with those rights on user objects.
 Runs only under -IncludeAclSweep or -Preset Deep due to the per-user ACL cost.
 .EXAMPLE
@@ -1483,7 +1483,7 @@ Get-ADScoutCrossForestEnum
             [PSCustomObject]@{
                 TrustedDomain       = $trustName; TrustDirection=$trust.TrustDirection
                 IsForestTrust       = $trust.IsForestTrust; SIDFilteringEnabled=$trust.SIDFilteringEnabled
-                Status              = 'Skipped — outbound-only trust'
+                Status              = 'Skipped -- outbound-only trust'
                 SearchBase=$null; DomainControllers=$null; UserCount=$null; ComputerCount=$null; Error=$null
             }
             continue
@@ -1555,7 +1555,7 @@ function Get-ADScoutFinding {
 Returns normalized findings sorted by operational priority.
 .DESCRIPTION
 ACL sweep (Find-ADScoutInterestingAce) is opt-in via -IncludeAclSweep or -Preset Deep.
-DCSync rights always checked — well-known privileged principals surfaced as Info.
+DCSync rights always checked -- well-known privileged principals surfaced as Info.
 Stale computers (>90 days) included as Low severity.
 .EXAMPLE
 Get-ADScoutFinding -SkipAclSweep
@@ -1637,7 +1637,7 @@ Get-ADScoutFinding -IncludeAclSweep
             'Find-ADScoutConstrainedDelegation' $x.DistinguishedName))
     }
 
-    # DCSync rights — severity pre-computed using SID suffix matching (locale-safe)
+    # DCSync rights -- severity pre-computed using SID suffix matching (locale-safe)
     foreach ($x in Find-ADScoutDCSyncRight -Server $Server -Credential $Credential -SearchBase $SearchBase) {
         $f.Add((New-ADScoutFinding $x.Severity 'Replication Rights' 'DCSync-related replication right' `
             $x.IdentityReference $x.RightName `
@@ -1860,9 +1860,9 @@ function Invoke-ADScout {
 .SYNOPSIS
 Runs ADScoutPS collection using operator presets.
 .DESCRIPTION
-Quick    — fast core collection, no GPO/OU/trust enumeration, no ACL sweep.
-Standard — adds GPOs, OUs, trusts, password policy, privileged group report. No ACL sweep.
-Deep     — full collection including ACL sweep (unless -SkipAclSweep is set).
+Quick    -- fast core collection, no GPO/OU/trust enumeration, no ACL sweep.
+Standard -- adds GPOs, OUs, trusts, password policy, privileged group report. No ACL sweep.
+Deep     -- full collection including ACL sweep (unless -SkipAclSweep is set).
 .EXAMPLE
 Invoke-ADScout -Preset Quick
 .EXAMPLE
@@ -1993,7 +1993,7 @@ Invoke-ADScout -Preset Deep -Report
 }
 
 # =============================================================================
-# TAB COMPLETION (inlined — no companion file needed)
+# TAB COMPLETION (inlined -- no companion file needed)
 # =============================================================================
 
 Register-ArgumentCompleter -CommandName Invoke-ADScout -ParameterName Preset -ScriptBlock {
@@ -2121,16 +2121,16 @@ Get-ADScoutSummary -Findings $results.Findings
     process { if ($Findings) { foreach ($f in $Findings) { $collected.Add($f) } } }
     end {
         if ($collected.Count -eq 0) {
-            Write-Host '[*] No findings passed — running Get-ADScoutFinding -SkipAclSweep ...' -ForegroundColor Cyan
+            Write-Host '[*] No findings passed -- running Get-ADScoutFinding -SkipAclSweep ...' -ForegroundColor Cyan
             $collected = @(Get-ADScoutFinding -Server $Server -Credential $Credential -SearchBase $SearchBase -SkipAclSweep)
         }
 
         $all = @($collected)
 
         Write-Host ''
-        Write-Host '╔══════════════════════════════════════════╗' -ForegroundColor Cyan
-        Write-Host '║         ADScoutPS — Finding Summary       ║' -ForegroundColor Cyan
-        Write-Host '╚══════════════════════════════════════════╝' -ForegroundColor Cyan
+        Write-Host '+==========================================+' -ForegroundColor Cyan
+        Write-Host '|         ADScoutPS -- Finding Summary       |' -ForegroundColor Cyan
+        Write-Host '+==========================================+' -ForegroundColor Cyan
         Write-Host ''
 
         # Severity counts
@@ -2148,7 +2148,7 @@ Get-ADScoutSummary -Findings $results.Findings
         if ($info     -gt 0) { Write-Host "    Info     : $info"     -ForegroundColor DarkGray }
         Write-Host ''
 
-        # Actionable hit checks — ordered by exploitation directness
+        # Actionable hit checks -- ordered by exploitation directness
         $checks = @(
             @{ Pattern='Password in description';               Label='Cleartext creds in description';  Color='Red'        }
             @{ Pattern='AS-REP roast candidate';                Label='AS-REP Roast';                    Color='Red'        }
@@ -2185,7 +2185,7 @@ Get-ADScoutSummary -Findings $results.Findings
         }
         if (-not $anyHit) { Write-Host '    None above threshold.' -ForegroundColor DarkGray }
 
-        # Info — trusts and DCs just as a count
+        # Info -- trusts and DCs just as a count
         Write-Host ''
         Write-Host '  Inventory (Info)' -ForegroundColor White
         $dcCount    = @($all | Where-Object { $_.Title -match 'Domain controller discovered' }).Count
