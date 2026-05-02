@@ -121,6 +121,7 @@ Short aliases for everything you'd type mid-engagement. Full function names alwa
 | `Find-Delegation` | `Find-ADScoutDelegationHint` |
 | `Find-DCSync` | `Find-ADScoutDCSyncRight` |
 | `Find-AclPaths` | `Find-ADScoutAclAttackPath` |
+| `Find-LocalAdmin` | `Find-ADScoutLocalAdminAccess` |
 | `Export-Run` | `Export-ADScoutRun` |
 | `Import-Run` | `Import-ADScoutRun` |
 
@@ -260,6 +261,11 @@ Find-Shadow
 
 # DCSync rights
 Find-DCSync
+
+# Local admin access (live host check -- touches SMB)
+Find-LocalAdmin
+Find-LocalAdmin -Verbose
+Find-LocalAdmin -ComputerName dc01,web04,files04
 
 # Domain info
 Get-Trusts

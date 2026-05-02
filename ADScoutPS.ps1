@@ -939,6 +939,114 @@ Finds admin/privileged-looking groups by name pattern.
         Where-Object { $_.Name -match 'admin|operator|backup|account|enterprise|schema|domain controllers' }
 }
 
+function Find-ADScoutLocalAdminAccess {
+<#
+.SYNOPSIS
+Finds computers where the current user has local administrator access.
+.DESCRIPTION
+Attempts to open the Service Control Manager (SCM) on each domain computer
+with SC_MANAGER_ALL_ACCESS. A successful connection means the current user
+has local admin rights on that machine -- same technique as PowerView's
+Find-LocalAdminAccess.
+
+Uses computers already collected in RunData (no re-collection).
+Falls back to a live LDAP query if no RunData is in session.
+
+Note: This touches live hosts over SMB (port 445). It will generate
+authentication events on target machines. Use with awareness of detection risk.
+
+Note: Will not work reliably against computers that are offline or
+blocking SMB. Errors per host are suppressed by default (-Verbose to see them).
+.EXAMPLE
+Find-LocalAdmin
+.EXAMPLE
+Find-LocalAdmin -Verbose
+.EXAMPLE
+Find-ADScoutLocalAdminAccess -ComputerName dc01,web04,files04
+#>
+    [CmdletBinding()]
+    param(
+        [string[]]$ComputerName,
+        [int]$TimeoutMs = 2000
+    )
+
+    # P/Invoke signature for OpenSCManager
+    $code = @'
+using System;
+using System.Runtime.InteropServices;
+public class SCMCheck {
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr OpenSCManager(string machineName, string databaseName, uint dwAccess);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    public static extern bool CloseServiceHandle(IntPtr hSCObject);
+    public const uint SC_MANAGER_ALL_ACCESS = 0xF003F;
+}
+'@
+    # Add type only once per session
+    if (-not ([System.Management.Automation.PSTypeName]'SCMCheck').Type) {
+        try { Add-Type -TypeDefinition $code -Language CSharp }
+        catch { Write-Warning "Failed to compile SCMCheck type: $($_.Exception.Message)"; return }
+    }
+
+    # Get computer list -- RunData first, then parameter, then live query
+    $targets = @()
+    if ($ComputerName -and $ComputerName.Count -gt 0) {
+        $targets = $ComputerName
+    } elseif ($script:ADScoutLastRun -and $script:ADScoutLastRun.Computers) {
+        $targets = @($script:ADScoutLastRun.Computers |
+                     ForEach-Object {
+                         $dns = Get-ADScoutSafeProperty $_ 'DnsHostName'
+                         $name = Get-ADScoutSafeProperty $_ 'Name'
+                         if ($dns) { $dns } elseif ($name) { $name }
+                     } | Where-Object { $_ })
+    } else {
+        Write-Host '[*] No RunData in session -- querying LDAP for computers...' -ForegroundColor DarkGray
+        $targets = @(Get-ADScoutComputer | ForEach-Object {
+            $dns = Get-ADScoutSafeProperty $_ 'DnsHostName'
+            $name = Get-ADScoutSafeProperty $_ 'Name'
+            if ($dns) { $dns } elseif ($name) { $name }
+        } | Where-Object { $_ })
+    }
+
+    if ($targets.Count -eq 0) {
+        Write-Warning 'No computers found to scan.'
+        return
+    }
+
+    Write-Host "[*] Scanning $($targets.Count) computers for local admin access..." -ForegroundColor Cyan
+    $found = [System.Collections.ArrayList]@()
+
+    foreach ($target in $targets) {
+        Write-Verbose "Trying $target..."
+        try {
+            $handle = [SCMCheck]::OpenSCManager($target, $null, [SCMCheck]::SC_MANAGER_ALL_ACCESS)
+            if ($handle -ne [IntPtr]::Zero) {
+                [void][SCMCheck]::CloseServiceHandle($handle)
+                Write-Host "[+] Local admin: $target" -ForegroundColor Green
+                [void]$found.Add([PSCustomObject]@{
+                    ComputerName = $target
+                    Access       = 'LocalAdmin'
+                    Method       = 'SCM-OpenSCManager'
+                    Timestamp    = Get-Date
+                })
+            } else {
+                $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                Write-Verbose "$target -- SCM error code: $err"
+            }
+        } catch {
+            Write-Verbose "$target -- $($_.Exception.Message)"
+        }
+    }
+
+    if ($found.Count -eq 0) {
+        Write-Host '[-] No local admin access found.' -ForegroundColor DarkYellow
+    } else {
+        Write-Host "[+] Local admin access on $($found.Count) machine(s)." -ForegroundColor Green
+    }
+
+    return @($found)
+}
+
 function Find-ADScoutPasswordInDescription {
 <#
 .SYNOPSIS
@@ -3162,6 +3270,7 @@ Set-Alias -Name Find-Delegation  -Value Find-ADScoutDelegationHint
 
 # ACL / privilege
 Set-Alias -Name Get-ADACL        -Value Get-ADScoutObjectAcl
+Set-Alias -Name Find-LocalAdmin  -Value Find-ADScoutLocalAdminAccess
 Set-Alias -Name Find-DCSync      -Value Find-ADScoutDCSyncRight
 Set-Alias -Name Find-AclPaths    -Value Find-ADScoutAclAttackPath
 Set-Alias -Name Get-Members      -Value Get-ADScoutGroupMember
