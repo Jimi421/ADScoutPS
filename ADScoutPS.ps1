@@ -3273,6 +3273,8 @@ Set-Alias -Name Find-Delegation  -Value Find-ADScoutDelegationHint
 
 # ACL / privilege
 Set-Alias -Name Get-ADACL        -Value Get-ADScoutObjectAcl
+Set-Alias -Name Show-Gui         -Value Show-ADScoutFindingsGui
+Set-Alias -Name Find-Interesting -Value Find-ADScoutInterestingAce
 Set-Alias -Name Find-LocalAdmin  -Value Find-ADScoutLocalAdminAccess
 Set-Alias -Name Find-DCSync      -Value Find-ADScoutDCSyncRight
 Set-Alias -Name Find-AclPaths    -Value Find-ADScoutAclAttackPath

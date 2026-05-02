@@ -1,33 +1,58 @@
 # ADScoutPS
 
-> PowerShell Active Directory enumeration and findings toolkit.  
-> One file. No RSAT. No ActiveDirectory module. No dependencies.
+> **One file. No RSAT. No ActiveDirectory module. No dependencies.**  
+> Drop it. Load it. Get answers.
+
+---
+
+## Why ADScoutPS
+
+Most AD enumeration tools give you data. ADScoutPS gives you answers.
+
+PowerView dumps raw LDAP. BloodHound needs a Neo4j database, a collector, and an importer. ADRecon generates a 50-tab spreadsheet you have to read yourself. ADScoutPS tells you **what to try first, in order, with the exact command to verify it** — in under 60 seconds from a cold start.
+
+```powershell
+Import-Module .\ADScoutPS.ps1 -LabMode
+Get-QuickWins
+```
+
+That's it. No setup. No Neo4j. No companion files. One `.ps1` dropped anywhere PowerShell runs.
+
+**What you get that you don't get elsewhere:**
+
+- `Get-QuickWins` — prioritized attack paths ranked by exploitation value. DA members surface first. Credentials in readable fields hit priority 1. Every result includes a copy-paste verify command.
+- `Get-PathHints` — chained multi-hop attack paths. Not just "this ACE exists" but "helpdesk has GenericWrite on svc_sql → svc_sql has an SPN → crack it → svc_sql is nested in Server Admins."
+- `Find-LocalAdmin` — live SMB scan using the same `OpenSCManager` technique as PowerView's `Find-LocalAdminAccess`. Where does your current user have local admin right now?
+- `Find-Passwords` — sweeps nine user and computer AD fields (`description`, `physicalDeliveryOfficeName`, `info`, `comment`, `homeDirectory`, and more) for credentials and flags. Not just description.
+- **Offline analysis** — export a full snapshot with `Export-Run`, reload it on any box with `Import-Run`, and run `Get-QuickWins` with zero domain connectivity. Full findings and path hints from a JSON file.
+- **LabMode** — adds `OS{`, `HTB{`, `FLAG{` patterns to credential scanning for OSCP/HTB/CTF environments.
+- **Locale-safe ACL filtering** — excludes privileged principals by SID suffix, not English group names. Works correctly on non-English Active Directory deployments.
+
+**Authorized use only. Use only in environments where you have explicit written permission.**
 
 ---
 
 ## What it is
 
-ADScoutPS is a single-file PowerShell AD enumeration tool built for offensive operators. Drop it on any domain-connected Windows box, load it, and ask: **what is the shortest path to Domain Admin from here?**
+ADScoutPS is a single-file PowerShell AD enumeration and findings tool. It collects domain data once, builds an in-memory model with fast traversal indexes, and runs a findings engine and path chain engine against it — no repeated LDAP queries, no re-collection, no companion files.
 
-No variables to manage. No `-RunData` to thread through commands. Collection runs automatically on load and session data is available to all analysis functions immediately.
-
-**Authorized use only.**
+The core question it answers: **what is the shortest path to Domain Admin from here?**
 
 ---
 
 ## Quick start
 
 ```powershell
-# Standard lab run
+# Standard lab run -- auto-collects on load
 Import-Module .\ADScoutPS.ps1 -LabMode
 Get-QuickWins
 
-# OSCP/HTB lab with ACL sweep
+# Full run with ACL sweep
 Import-Module .\ADScoutPS.ps1 -Preset Deep -LabMode
 Get-QuickWins
 Get-PathHints
 
-# Load only, collect on your own terms
+# Load only, collect manually with options
 Import-Module .\ADScoutPS.ps1 -LoadOnly
 Collect -Preset Standard -LabMode -Server dc01.corp.local
 Get-QuickWins
@@ -41,26 +66,33 @@ Get-QuickWins
 # Load -- collection runs automatically
 Import-Module .\ADScoutPS.ps1 -LabMode
 
-# Shortest path to DA
+# Shortest path to DA -- start here
 Get-QuickWins
 
-# Full findings with context
+# Full findings with context and summary banner
 Get-Findings | Get-Summary
 
-# Chained attack paths
+# Chained multi-hop attack paths
 Get-PathHints
+
+# Browse results in interactive GUI
+Show-Gui
+Show-Gui -View PrivilegedGroups
+Show-Gui -View Users
 
 # Drill into specifics
 Get-Members -Identity 'Domain Admins' -Recursive
 Find-ASREP
 Find-SPNs | Where-Object AdminCount -eq 1
+Find-LocalAdmin
 Get-ADACL -Identity 'Domain Admins'
 Find-Passwords
+Find-Interesting
 
-# Export snapshot -- offline analysis, no domain needed
+# Export snapshot for offline analysis -- no domain needed
 Export-Run -Path .\snapshot.json
 
-# --- On another box ---
+# --- On another box, fully offline ---
 Import-Module .\ADScoutPS.ps1 -LoadOnly
 Import-Run -Path .\snapshot.json
 Get-QuickWins
@@ -80,10 +112,10 @@ Get-QuickWins
 | Priority | Category | What it means |
 |---|---|---|
 | 1 | Credential Exposure | Password or flag in a readable AD field — instant win |
-| 2 | AS-REP Roast | DA members and adminCount=1 accounts surfaced first |
-| 3 | Kerberoast | DA members and adminCount=1 accounts surfaced first |
+| 2 | AS-REP Roast | DA members and adminCount=1 accounts first |
+| 3 | Kerberoast | DA members and adminCount=1 accounts first |
 | 4 | Unconstrained Delegation | Coerce a DC to authenticate here, capture the TGT |
-| 5 | DCSync | Non-standard principal — if you control it, dump all hashes |
+| 5 | DCSync | Non-standard principal with replication rights |
 | 6 | ACL Attack Path | Abusable ACE on a privileged group, DA, krbtgt, or DC |
 | 7 | Targeted Kerberoast | GenericWrite on a user — set a SPN and Kerberoast |
 | 8 | Privilege Path | Nested group membership path to Domain Admins |
@@ -95,7 +127,7 @@ Each result prints `Target`, `Why`, `Evidence`, and a ready-to-run `ManualVerify
 
 ## Aliases
 
-Short aliases for everything you'd type mid-engagement. Full function names always work too.
+Short aliases available after loading. Full function names always work too.
 
 | Alias | Full name |
 |---|---|
@@ -122,6 +154,8 @@ Short aliases for everything you'd type mid-engagement. Full function names alwa
 | `Find-DCSync` | `Find-ADScoutDCSyncRight` |
 | `Find-AclPaths` | `Find-ADScoutAclAttackPath` |
 | `Find-LocalAdmin` | `Find-ADScoutLocalAdminAccess` |
+| `Find-Interesting` | `Find-ADScoutInterestingAce` |
+| `Show-Gui` | `Show-ADScoutFindingsGui` |
 | `Export-Run` | `Export-ADScoutRun` |
 | `Import-Run` | `Import-ADScoutRun` |
 
@@ -131,8 +165,8 @@ Short aliases for everything you'd type mid-engagement. Full function names alwa
 
 | Preset | What it collects | ACL sweep |
 |---|---|---|
-| `Quick` | Users, groups, computers, DCs, Kerberos, delegation, shadow creds, machine account quota, DCSync, password policy | No |
-| `Standard` | Quick + GPOs, OUs, trusts, linked GPOs, privileged group report, cross-trust enumeration | No |
+| `Quick` | Users, groups, computers, DCs, Kerberos, delegation, shadow creds, machine account quota, DCSync, password policy, LAPS, stale computers | No |
+| `Standard` | Quick + GPOs, OUs, trusts, linked GPOs, privileged group report, cross-forest enumeration | No |
 | `Deep` | Standard + ACL sweep: AdminSDHolder ACEs, GPO write permissions, targeted Kerberoast paths, ACL attack paths | Yes |
 
 ```powershell
@@ -153,7 +187,7 @@ ACL sweep is slower on large domains. In OSCP/PEN-200 labs the cost is negligibl
 Import-Module .\ADScoutPS.ps1 -LabMode
 ```
 
-Expands `Find-Passwords` to also match CTF flag patterns: `OS{`, `HTB{`, `FLAG{`. In normal mode only production credential keywords are checked to reduce false positives.
+Expands `Find-Passwords` to also match CTF-style flag patterns: `OS{`, `HTB{`, `FLAG{`. In normal mode only production credential keywords are used.
 
 ---
 
@@ -182,6 +216,9 @@ Get-Findings | Where-Object Severity -eq 'Critical'
 
 # Copy-paste verify commands for every Critical finding
 Get-Findings | Where-Object Severity -eq 'Critical' | Select-Object Title, Target, ManualVerify | Format-List
+
+# Browse findings in GUI
+Show-Gui
 ```
 
 ---
@@ -223,54 +260,169 @@ Get-PathHints -To 'Domain Admins'
 Get-PathHints | Sort-Object ChainSeverity | Format-List
 ```
 
-Chain types detected: `ACE->Kerberoast`, `ACE->DA`, `ACE->Tier0`, `SPN->Privesc`, `ASREP->Privesc`, `GPOWrite->Tier0`, `DCSync->CredDump`.
+Chain types: `ACE->Kerberoast`, `ACE->DA`, `ACE->Tier0`, `SPN->Privesc`, `ASREP->Privesc`, `GPOWrite->Tier0`, `DCSync->CredDump`.
 
 Each chain returns: `ChainSeverity`, `ChainType`, `Principal`, `Hops`, `TerminalImpact`, `NextCommand`.
 
 ---
 
-## Drilling deeper
+## GUI
+
+Interactive `Out-GridView` browser for any collected dataset. Supports live filtering, sorting, and column selection.
 
 ```powershell
-# Who's in a group (recursive, shows nesting path)
-Get-Members -Identity 'Domain Admins' -Recursive
-Get-Members -Identity 'Backup Operators' -Recursive
+Show-Gui                          # findings dashboard
+Show-Gui -View PrivilegedGroups   # privileged group members
+Show-Gui -View Delegation         # delegation review
+Show-Gui -View Users              # all users
+Show-Gui -View Computers          # all computers
+Show-Gui -View All                # opens multiple windows
+```
 
-# All privileged group members
-Get-ADScoutGroupReport -PrivilegedOnly -Recursive
+Falls back to `Format-Table` if `Out-GridView` is unavailable (Server Core, PS 7 without the GUI module).
 
-# ACL on any object -- GUIDs resolved to right names
-Get-ADACL -Identity 'Domain Admins'
+---
+
+## Full function reference
+
+### Environment
+
+```powershell
+Get-ADScoutVersion                # version and runtime info
+Test-ADScoutEnvironment           # preflight check -- domain connectivity, LDAP bind, MAQ
+```
+
+### Collection
+
+```powershell
+Collect -Preset Quick|Standard|Deep [-LabMode] [-SkipAclSweep] [-IncludeAclSweep]
+Collect -Server dc01.corp.local
+Collect -Credential $cred -Server dc01.corp.local -SearchBase 'DC=corp,DC=local'
+```
+
+### Users
+
+```powershell
+Get-Users                         # all users with decoded UacFlags, HasShadowCredential
+Get-Users | Where-Object AdminCount -eq 1
+Get-Users | Where-Object HasShadowCredential
+ConvertTo-ADScoutUacFlag -UserAccountControl 66048   # decode UAC int to flag names
+Find-ADScoutPrivilegedUser        # members of all privileged groups
+Find-ADScoutWeakUacFlag           # PASSWD_NOTREQD, USE_DES_KEY_ONLY, etc.
+```
+
+### Groups
+
+```powershell
+Get-Groups
+Get-Members -Identity 'Domain Admins' -Recursive    # recursive with nesting depth + path
+Get-ADScoutGroupReport -PrivilegedOnly -Recursive   # all privileged groups expanded
+Get-ADScoutGroupReport -GroupName 'DnsAdmins','Backup Operators' -Recursive
+Get-ADScoutPrivilegePath          # users with any path to a privileged group
+Find-ADScoutAdminGroup            # groups matching admin/operator/backup name patterns
+Find-ADScoutAdminSDHolderOrphan   # all adminCount=1 objects
+```
+
+### Computers
+
+```powershell
+Get-Computers                     # includes Description, HasShadowCredential, UacFlags
+Get-DCs                           # domain controllers only
+Get-ADScoutLapsStatus             # LAPS coverage per computer
+Find-ADScoutOldComputer -Days 90  # stale computer accounts
+Find-LocalAdmin                   # live SMB scan -- where does current user have local admin
+Find-LocalAdmin -Verbose          # shows per-host error codes
+Find-LocalAdmin -ComputerName dc01,web04,files04
+```
+
+### Kerberos
+
+```powershell
+Find-ASREP                        # AS-REP roast candidates (preauth disabled)
+Find-SPNs                         # Kerberoast candidates (SPN-bearing users)
+Find-SPNs | Where-Object AdminCount -eq 1    # high-value cracks first
+Find-Shadow                       # accounts with msDS-KeyCredentialLink set
+```
+
+### Delegation
+
+```powershell
+Find-Delegation                   # all delegation -- unconstrained + KCD + RBCD
+Find-ADScoutUnconstrainedDelegation
+Find-ADScoutConstrainedDelegation
+```
+
+### ACL
+
+```powershell
+Get-ADACL -Identity 'Domain Admins'          # ACL on any object, GUIDs resolved
 Get-ADACL -Identity 'krbtgt'
 Get-ADACL -DistinguishedName 'CN=AdminSDHolder,CN=System,DC=corp,DC=com'
+Find-Interesting                             # interesting ACEs on domain root
+Find-Interesting -Identity 'Domain Admins'   # interesting ACEs on specific object
+Find-DCSync                                  # DCSync rights -- non-standard = Critical
+Find-AclPaths                                # ACL sweep -- all privileged targets (Deep/IncludeAclSweep)
+Find-ADScoutAdminSDHolderAce                 # non-standard ACEs on AdminSDHolder object
+Find-ADScoutGPOWritePermission               # GPO write linked to privileged OUs
+Find-ADScoutTargetedKerberoastPath           # GenericWrite on users = targeted Kerberoast
+```
 
-# Kerberos
-Find-ASREP
-Find-SPNs
-Find-SPNs | Where-Object AdminCount -eq 1
+### Credential exposure
 
-# Credential exposure
-Find-Passwords
-Find-Passwords -LabMode
+```powershell
+Find-Passwords                    # production mode -- pass, pwd, cred, secret, etc.
+Find-Passwords -LabMode           # adds OS{, HTB{, FLAG{ patterns
+```
 
-# Delegation
-Find-Delegation
+Checks on users: `description`, `info`, `comment`, `physicalDeliveryOfficeName`, `homeDirectory`, `scriptPath`, `profilePath`, `homePhone`, `streetAddress`.  
+Checks on computers: `description`, `info`, `comment`, `physicalDeliveryOfficeName`, `location`.
 
-# Shadow credentials
-Find-Shadow
+### Domain
 
-# DCSync rights
-Find-DCSync
+```powershell
+Get-ADScoutDomainInfo
+Get-Trusts                        # decoded TrustDirection, TrustType, SIDFiltering, IsForestTrust
+Get-Policy                        # default domain + fine-grained PSOs
+Get-ADScoutMachineAccountQuota    # ms-DS-MachineAccountQuota (RBCD/shadow cred prereq)
+Get-ADScoutCrossForestEnum        # enumerate reachable trusted domains
+```
 
-# Local admin access (live host check -- touches SMB)
-Find-LocalAdmin
-Find-LocalAdmin -Verbose
-Find-LocalAdmin -ComputerName dc01,web04,files04
+### GPO / OU
 
-# Domain info
-Get-Trusts
-Get-Policy
-Get-DCs
+```powershell
+Get-GPOs
+Get-OUs
+Get-ADScoutLinkedGPO              # OUs with linked GPOs only
+```
+
+### Analysis
+
+```powershell
+Get-QuickWins                     # shortest path to DA, prioritized
+Get-Findings | Get-Summary        # full findings with color-coded banner
+Get-PathHints                     # chained multi-hop attack paths
+Get-PathHints -From 'helpdesk'
+Get-PathHints -To 'Domain Admins'
+```
+
+### GUI
+
+```powershell
+Show-Gui                          # findings dashboard
+Show-Gui -View PrivilegedGroups
+Show-Gui -View Delegation
+Show-Gui -View Users
+Show-Gui -View Computers
+Show-Gui -View All
+```
+
+### Export / Import / Report
+
+```powershell
+Export-Run -Path .\snapshot.json              # full snapshot for offline analysis
+Import-Run -Path .\snapshot.json              # reload -- indexes rebuilt automatically
+New-ADScoutHtmlReport -RunData $data -OutputPath .\report.html   # standalone HTML report
+.\ADScoutPS.ps1 -Preset Standard -Report     # direct execution with auto-report
 ```
 
 ---
@@ -278,17 +430,10 @@ Get-DCs
 ## Alternate targets
 
 ```powershell
-# Explicit DC
 Collect -Server dc01.corp.local
-
-# Alternate credentials
 $cred = Get-Credential
 Collect -Server dc01.corp.local -Credential $cred
-
-# Scope to an OU
 Collect -SearchBase 'OU=Workstations,DC=corp,DC=local'
-
-# Non-domain-joined box
 Collect -Server dc01.corp.local -Credential $cred -SearchBase 'DC=corp,DC=local'
 ```
 
@@ -296,37 +441,33 @@ Collect -Server dc01.corp.local -Credential $cred -SearchBase 'DC=corp,DC=local'
 
 ## Snapshots
 
-Export a full collection for offline analysis — no domain connection needed to analyze.
+Full offline analysis from a JSON snapshot. No domain connection needed after export.
 
 ```powershell
-# Export after collection
+# Export
 Export-Run -Path .\snapshot.json
 
-# Import on any box
+# Import and analyze offline
 Import-Module .\ADScoutPS.ps1 -LoadOnly
 Import-Run -Path .\snapshot.json
 Get-QuickWins
 Get-PathHints
 Get-Findings | Get-Summary
+Show-Gui
 ```
 
 ---
 
-## Direct execution with export
+## Direct execution with file output
 
-For a full run that writes CSV/JSON files and an HTML report:
+Writes timestamped CSV/JSON per collection key plus `summary.md`, `snapshot.json`, and optionally `report.html`.
 
 ```powershell
-# Standard run -- writes to ADScout-Results\
 .\ADScoutPS.ps1 -Preset Standard -LabMode
-
-# Full run with HTML report
 .\ADScoutPS.ps1 -Preset Deep -LabMode -Report
-
-# Custom output path
 .\ADScoutPS.ps1 -Preset Standard -OutputPath C:\Assessments\Corp -LabMode
-
-# Restricted execution policy
+.\ADScoutPS.ps1 -OutputFormat CSV
+.\ADScoutPS.ps1 -OutputFormat JSON
 powershell -ExecutionPolicy Bypass -File .\ADScoutPS.ps1 -Preset Standard -LabMode
 ```
 
@@ -334,21 +475,22 @@ powershell -ExecutionPolicy Bypass -File .\ADScoutPS.ps1 -Preset Standard -LabMo
 
 ## How it works
 
-ADScoutPS uses `System.DirectoryServices` directly — no ActiveDirectory module, no RSAT, no binaries beyond the script. Every query is standard LDAP on port 389.
+ADScoutPS uses `System.DirectoryServices` directly — no ActiveDirectory module, no RSAT, no binaries beyond the script. Every LDAP query runs on port 389. Local admin scanning uses a P/Invoke call to `advapi32.dll!OpenSCManager` on port 445 (SMB).
 
-`Collect` runs once and builds a `RunData` object containing all collected data plus fast lookup indexes (`GroupMembershipIndex`, `UserGroupIndex`, `TierZeroObjects`, `ObjectByDN`, `ObjectBySam`). All analysis functions consume this object without re-querying LDAP. After `Import-Run`, analysis works identically offline.
+`Collect` runs once and builds a `RunData` object with all collected data plus fast lookup indexes (`GroupMembershipIndex`, `UserGroupIndex`, `TierZeroObjects`, `ObjectByDN`, `ObjectBySam`). All analysis functions consume this object without re-querying LDAP. After `Import-Run`, analysis works identically offline.
 
-ACE `ObjectType` GUIDs are resolved via a 60+ entry static map to human-readable right names (`User-Force-Change-Password`, `DS-Replication-Get-Changes-All`, etc.). Each ACE also includes a resolved `IdentitySid` for locale-safe privileged principal filtering — works correctly on non-English AD deployments.
+ACE `ObjectType` GUIDs are resolved via a 60+ entry static map to human-readable right names (`User-Force-Change-Password`, `DS-Replication-Get-Changes-All`, etc.). Each ACE includes a resolved `IdentitySid` for locale-safe privileged principal filtering — works correctly on non-English AD deployments where group names are localized.
 
 ---
 
 ## Caveats
 
 - **`lastLogonTimestamp` jitter** — stale computer results carry ~14 day fuzziness by AD design
-- **LAPS** — checks attribute presence, not whether the password is readable to you
+- **LAPS** — checks attribute presence, not whether the password value is readable to you
 - **ACL sweep** — slow on large production domains; negligible in lab environments
 - **Shadow credentials** — WHFB-enrolled devices have legitimate entries; review before concluding abuse
-- **DCSync expected holders** — Domain Admins, DCs, Enterprise Admins returned as `Info`; everything else is `Critical`
+- **DCSync expected holders** — Domain Admins, DCs, Enterprise Admins returned as `Info`; everything else `Critical`
+- **`Find-LocalAdmin`** — touches live hosts over SMB (port 445); generates authentication events
 
 ---
 
