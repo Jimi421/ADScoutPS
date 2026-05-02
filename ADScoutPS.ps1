@@ -979,7 +979,9 @@ public class SCMCheck {
     public static extern IntPtr OpenSCManager(string machineName, string databaseName, uint dwAccess);
     [DllImport("advapi32.dll", SetLastError=true)]
     public static extern bool CloseServiceHandle(IntPtr hSCObject);
-    public const uint SC_MANAGER_ALL_ACCESS = 0xF003F;
+    public const uint SC_MANAGER_ALL_ACCESS    = 0xF003F;
+    public const uint SC_MANAGER_CONNECT       = 0x0001;
+    public const uint SERVICES_ACTIVE_DATABASE = 0;
 }
 '@
     # Add type only once per session
@@ -1019,7 +1021,7 @@ public class SCMCheck {
     foreach ($target in $targets) {
         Write-Verbose "Trying $target..."
         try {
-            $handle = [SCMCheck]::OpenSCManager($target, $null, [SCMCheck]::SC_MANAGER_ALL_ACCESS)
+            $handle = [SCMCheck]::OpenSCManager($target, 'ServicesActive', [SCMCheck]::SC_MANAGER_ALL_ACCESS)
             if ($handle -ne [IntPtr]::Zero) {
                 [void][SCMCheck]::CloseServiceHandle($handle)
                 Write-Host "[+] Local admin: $target" -ForegroundColor Green
@@ -1031,7 +1033,7 @@ public class SCMCheck {
                 })
             } else {
                 $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                Write-Verbose "$target -- SCM error code: $err"
+                Write-Verbose "$target -- access denied (error $err)"
             }
         } catch {
             Write-Verbose "$target -- $($_.Exception.Message)"
