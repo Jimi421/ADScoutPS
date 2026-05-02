@@ -5,38 +5,33 @@
 
 ---
 
-## Why ADScoutPS
+## What it does
 
-Most AD enumeration tools give you data. ADScoutPS gives you answers.
-
-PowerView dumps raw LDAP. BloodHound needs a Neo4j database, a collector, and an importer. ADRecon generates a 50-tab spreadsheet you have to read yourself. ADScoutPS tells you **what to try first, in order, with the exact command to verify it** — in under 60 seconds from a cold start.
+ADScoutPS is a PowerShell Active Directory enumeration and findings toolkit built for operators. Drop it on any domain-connected Windows box and load it — collection runs automatically, session data is stored, and every analysis function is ready to go.
 
 ```powershell
 Import-Module .\ADScoutPS.ps1 -LabMode
 Get-QuickWins
 ```
 
-That's it. No setup. No Neo4j. No companion files. One `.ps1` dropped anywhere PowerShell runs.
+**It has two modes and they work together:**
 
-**What you get that you don't get elsewhere:**
+**Auto mode** — load it and it collects. `Get-QuickWins` immediately surfaces the highest-value attack paths in priority order. Every result includes a ready-to-run verify command. No setup, no variables, no threading data between commands.
 
-- `Get-QuickWins` — prioritized attack paths ranked by exploitation value. DA members surface first. Credentials in readable fields hit priority 1. Every result includes a copy-paste verify command.
-- `Get-PathHints` — chained multi-hop attack paths. Not just "this ACE exists" but "helpdesk has GenericWrite on svc_sql → svc_sql has an SPN → crack it → svc_sql is nested in Server Admins."
-- `Find-LocalAdmin` — live SMB scan using the same `OpenSCManager` technique as PowerView's `Find-LocalAdminAccess`. Where does your current user have local admin right now?
-- `Find-Passwords` — sweeps nine user and computer AD fields (`description`, `physicalDeliveryOfficeName`, `info`, `comment`, `homeDirectory`, and more) for credentials and flags. Not just description.
-- **Offline analysis** — export a full snapshot with `Export-Run`, reload it on any box with `Import-Run`, and run `Get-QuickWins` with zero domain connectivity. Full findings and path hints from a JSON file.
-- **LabMode** — adds `OS{`, `HTB{`, `FLAG{` patterns to credential scanning for OSCP/HTB/CTF environments.
-- **Locale-safe ACL filtering** — excludes privileged principals by SID suffix, not English group names. Works correctly on non-English Active Directory deployments.
+**Manual enumeration** — every collection and analysis function is exposed individually. Query users, groups, computers, ACLs, Kerberos targets, delegation, GPOs, trusts, and group membership exactly how you want. Pipe, filter, and combine like any other PowerShell tool.
+
+**What makes it an operator tool:**
+
+- **`Get-QuickWins`** — ranked attack paths. DA members and adminCount=1 accounts surface first in every category. Credentials in readable fields hit priority 1. Each result tells you what it is, why it matters, and the exact command to verify it.
+- **`Get-PathHints`** — chained multi-hop attack paths across collected data. Connects ACEs, group membership, SPNs, delegation, and DCSync rights into full exploitation chains without re-querying LDAP.
+- **`Find-LocalAdmin`** — live SMB scan. Checks every domain computer and tells you where your current user has local admin access right now.
+- **`Find-Passwords`** — sweeps nine AD string fields on every user and computer account, not just description. `physicalDeliveryOfficeName`, `info`, `comment`, `homeDirectory`, `scriptPath`, and more. Catches credentials and flags that narrow field checks miss.
+- **Normalized findings** — every finding includes severity, evidence, plain-language explanation, recommended action, and a copy-paste verify command. Not raw data — operator-ready output.
+- **Offline snapshots** — export a full collection with `Export-Run`, reload it anywhere with `Import-Run`. Full findings and path hints with zero domain connectivity.
+- **LabMode** — expands credential scanning to include CTF flag patterns for OSCP, HTB, and lab environments.
+- **ACL analysis** — reads ACLs directly from AD using `System.DirectoryServices`. Every ACE resolved: GUIDs converted to human-readable right names, SIDs resolved for locale-safe filtering. Works on non-English AD deployments.
 
 **Authorized use only. Use only in environments where you have explicit written permission.**
-
----
-
-## What it is
-
-ADScoutPS is a single-file PowerShell AD enumeration and findings tool. It collects domain data once, builds an in-memory model with fast traversal indexes, and runs a findings engine and path chain engine against it — no repeated LDAP queries, no re-collection, no companion files.
-
-The core question it answers: **what is the shortest path to Domain Admin from here?**
 
 ---
 
