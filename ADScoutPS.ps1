@@ -3134,6 +3134,7 @@ Get-ADScoutQuickWins -RunData $r.RunData
 }
 
 
+function Get-ADScoutSummary {
 <#
 .SYNOPSIS
 Prints a concise, color-coded summary of findings grouped by what's actionable.
